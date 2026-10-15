@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import config, ls, strategies
+from . import config, console, ls, strategies
 
 log = logging.getLogger(__name__)
 NY = ZoneInfo("America/New_York")
@@ -73,6 +73,12 @@ def _decide(key, acct, px, price, now):
     acct["trades"].append({"time": int(now), "date": acct["decided"], "expo": round(expo, 3), "from": want - trade, "to": want,
                            "price": price, "fee": fee, "close": float(px.iloc[-1])})
     del acct["trades"][:-500]
+    pos = lambda n: f"롱 {n}계약" if n > 0 else f"숏 {-n}계약" if n < 0 else "없음"
+    name = config.CANDIDATES[key]["name"].split(" · ")[0]
+    if trade:
+        console.success(log, "가상 매매 · %s: %s → %s @ %s (노출 %.2f배, 비용 $%.0f)", name, pos(held), pos(want), f"{price:,.2f}", expo, fee)
+    else:
+        log.info("가상 매매 · %s: %s 그대로 (노출 %.2f배)", name, pos(want), expo)
 
 
 def tick():
@@ -82,8 +88,12 @@ def tick():
         symbol = status["symbol"] or ls.front_month()["Symbol"]
         price = float(ls.quote(symbol)["TrdP"])
     except Exception as e:
+        if not status["error"]:  # 끊긴 순간에 한 번만 알린다(1분마다 찍지 않게)
+            log.warning("MNQ 시세를 받지 못했습니다: %s", e)
         status["error"] = f"{datetime.now():%m-%d %H:%M} MNQ 시세를 받지 못했습니다: {e}"
         return
+    if status["error"] or not status["price"]:
+        console.success(log, "MNQ 시세 %s: %s · 가상 계좌 %d개를 1분마다 계산합니다", "다시 연결" if status["error"] else "연결", f"{price:,.2f} ({symbol})", len(config.CANDIDATES))
     status.update(symbol=symbol, price=price, price_at=int(now), error=None)
     ny = datetime.now(NY)
     due = (ny.hour, ny.minute) >= config.DECIDE_AFTER and ny.weekday() < 5

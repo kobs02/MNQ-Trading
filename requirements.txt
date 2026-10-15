@@ -4,3 +4,5 @@ pandas
 yfinance
 flask
 tzdata
+pystray
+pillow

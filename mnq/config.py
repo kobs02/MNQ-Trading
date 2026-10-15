@@ -1,6 +1,8 @@
 """설정: LS증권 OPEN API 주소, 키 파일 위치, 거래할 상품."""
 from pathlib import Path
 
+VERSION = "0.1.0"
+
 ROOT = Path(__file__).resolve().parent.parent
 STORE = ROOT / "store"            # 토큰, 받은 시세, 주문 기록. git에 올리지 않는다
 KEYS_PATH = ROOT / "keys.json"    # {"appkey": "...", "appsecret": "..."} 모의투자용 키. git에 올리지 않는다
