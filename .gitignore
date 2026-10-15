@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+store/
+# 앱키·시크릿
+keys.json

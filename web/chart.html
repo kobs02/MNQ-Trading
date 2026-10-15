@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>실시간 차트 | MNQ Trader</title>
+  <link rel="icon" type="image/png" href="icon.png">
+  <meta name="theme-color" content="#1d2431">
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/wanteddev/wanted-sans@v1.0.3/packages/wanted-sans/fonts/webfonts/variable/split/WantedSansVariable.min.css">
+  <link rel="stylesheet" href="style.css">
+  <script>document.documentElement.dataset.theme = localStorage.getItem("theme") === "light" ? "light" : "dark";</script>
+  <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#side">매매 정보로 건너뛰기</a>
+  <header>
+    <nav class="pages" aria-label="페이지">
+      <a href="chart.html" class="active" aria-current="page">실시간 차트</a>
+      <a href="paper.html">모의 운용</a>
+    </nav>
+    <span id="conn" class="conn" role="status">연결 중…</span>
+  </header>
+
+  <main>
+    <div id="chart-col">
+      <h1 class="sr-only">MNQ 실시간 차트</h1>
+      <!-- 종목 줄: 무엇을 보고 있는가(종목, 가격) 왼쪽, 봉 단위 오른쪽 -->
+      <div class="instrument">
+        <div class="symbol-name"><b id="symbol">MNQ</b><small id="symbol-name">Micro E-mini Nasdaq-100</small></div>
+        <span id="price" class="price">-</span>
+        <span id="change" class="change"></span>
+        <nav id="intervals" class="pill-group" aria-label="봉 단위"></nav>
+      </div>
+      <section id="chart-wrap">
+        <div id="chart"></div>
+        <div id="legend" class="legend"></div>
+        <div id="chart-msg" class="chart-msg" role="status">차트를 불러오는 중…</div>
+      </section>
+    </div>
+    <div id="resizer" class="resizer" role="separator" aria-orientation="vertical" aria-label="차트와 매매 정보 크기 조절" tabindex="0" title="드래그하거나 좌우 화살표로 크기를 조절합니다 (더블클릭: 원래대로)"></div>
+    <aside id="side" tabindex="-1">
+      <section class="card">
+        <h2>자동매매 후보 <small>차트에 이 후보의 매매를 표시합니다</small></h2>
+        <div id="picks" class="pick-list" role="group" aria-label="후보"></div>
+      </section>
+      <section class="card">
+        <h2>지금 포지션 <small id="pos-note"></small></h2>
+        <div id="position"></div>
+      </section>
+      <section class="card">
+        <h2>다음 자동매매 <small>평일 뉴욕 16:10, 그날 종가로 결정</small></h2>
+        <div id="next"></div>
+      </section>
+      <section class="card">
+        <h2>시세 <small id="quote-note"></small></h2>
+        <div id="quote"></div>
+      </section>
+      <section class="card">
+        <h2>매매 기록 <small>최근 순</small></h2>
+        <div id="trades" class="journal"></div>
+      </section>
+      <p class="disclaimer">실제 주문을 내지 않는 가상의 계좌입니다. 시세는 LS증권 해외선물 OPEN API입니다.</p>
+    </aside>
+  </main>
+
+  <script src="chart.js"></script>
+  <script src="theme.js"></script>
+</body>
+</html>
