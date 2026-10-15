@@ -1,4 +1,5 @@
-// 실시간 차트 페이지: MNQ 근월물 봉을 2초마다 이어 그리고, 고른 후보의 자동매매(가상 계좌가 계약 수를 바꾼 때)를 화살표로 표시한다.
+// 실시간 차트 페이지: MNQ 근월물 봉을 0.5초마다 이어 그린다(서버가 LS 실시간 체결로 마지막 봉을 고친다).
+// 분봉에는 고른 후보의 가상 매매를, 일봉(2021 ~)에는 그 후보의 규칙이 롱을 들고 정리한 자리를 화살표로 표시한다.
 // 오른쪽 칸에는 그 후보의 포지션, 다음 자동매매, 시세, 매매 기록을 보여 준다.
 
 const $ = (id) => document.getElementById(id);
@@ -9,7 +10,7 @@ const fmtSigned = (v, digits = 2) => (v == null ? '-' : (v >= 0 ? '+' : '') + (v
 const fmtTime = (sec) => new Date(sec * 1000).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const tone = (v) => (v > 0 ? 'c-up' : v < 0 ? 'c-down' : '');
 const position = (n) => (n > 0 ? `<span class="c-up">롱 ${n}계약</span>` : n < 0 ? `<span class="c-down">숏 ${-n}계약</span>` : '없음');
-const INTERVALS = { 1: '1분', 5: '5분', 15: '15분', 60: '1시간' };
+const INTERVALS = { 1: '1분', 5: '5분', 15: '15분', 60: '1시간', D: '일봉' };
 const UP = '#26a69a', DOWN = '#ef5350';
 // 차트 라이브러리는 UTC로 표시하므로 시각을 이 컴퓨터의 시간대만큼 밀어서 넣는다
 const TZ = -new Date().getTimezoneOffset() * 60;
@@ -21,6 +22,7 @@ const state = {
   bars: [],
   quote: null,
   trading: null,
+  signals: null,     // 후보마다 2021년부터 규칙대로 계약 수를 바꾼 날들(일봉에 표시)
   generation: 0,     // 봉 단위를 바꿀 때마다 늘린다. 늦게 온 이전 응답을 버리는 용도
 };
 
@@ -51,17 +53,24 @@ const shifted = (b) => ({ ...b, time: b.time + TZ });
 
 async function loadBars(fresh) {
   const gen = state.generation;
-  const d = await api(`/api/chart?interval=${state.interval}`);
+  const whole = fresh || state.last == null;
+  // 처음에는 봉 전체를, 그다음부터는 마지막 봉부터만 받는다(0.5초마다 물으므로 가볍게)
+  const d = await api(`/api/chart?interval=${state.interval}${whole ? '' : `&since=${state.last}`}`);
   if (gen !== state.generation) return;
   state.quote = d.quote;
-  if (fresh || state.last == null) {
+  if (whole) {
     series.setData(d.bars.map(shifted));
+    state.bars = d.bars;
     chart.timeScale().scrollToRealTime();
   } else {
-    d.bars.filter((b) => b.time >= state.last).forEach((b) => series.update(shifted(b)));
+    d.bars.forEach((b) => {
+      series.update(shifted(b));
+      const i = state.bars.length - 1;
+      if (i >= 0 && state.bars[i].time === b.time) state.bars[i] = b;
+      else if (i < 0 || b.time > state.bars[i].time) state.bars.push(b);
+    });
   }
-  state.bars = d.bars;
-  state.last = d.bars.length ? d.bars[d.bars.length - 1].time : null;
+  state.last = state.bars.length ? state.bars[state.bars.length - 1].time : null;
   $('chart-msg').hidden = d.bars.length > 0;
   renderQuote();
   renderMarkers();
@@ -72,7 +81,8 @@ let legendHover = false;
 function renderLegend(b) {
   if (!b) { $('legend').innerHTML = ''; return; }
   const change = (b.close - b.open) / b.open;
-  $('legend').innerHTML = `<b>${INTERVALS[state.interval]}</b>시 ${fmtPrice(b.open)} · 고 ${fmtPrice(b.high)} · 저 ${fmtPrice(b.low)} · 종 ${fmtPrice(b.close)}
+  const day = state.interval === 'D' ? `${new Date(b.time * 1000).toISOString().slice(0, 10)} · ` : '';
+  $('legend').innerHTML = `<b>${INTERVALS[state.interval]}</b>${day}시 ${fmtPrice(b.open)} · 고 ${fmtPrice(b.high)} · 저 ${fmtPrice(b.low)} · 종 ${fmtPrice(b.close)}
     <span class="${tone(change)}">${fmtSigned(change, 2)}</span> · 거래량 ${b.volume.toLocaleString('en-US')}`;
 }
 chart.subscribeCrosshairMove((p) => {
@@ -84,19 +94,32 @@ chart.subscribeCrosshairMove((p) => {
 // ---------- 자동매매 표시 ----------
 const current = () => state.trading && (state.trading.candidates.find((c) => c.key === state.candidate) || state.trading.candidates[state.trading.candidates.length - 1]);
 
+// 계약 수 변화 하나를 화살표 하나로: 새로 들면 "롱 진입 4", 다 정리하면 "청산", 그 밖에는 늘리거나 줄인 계약 수
+function marker(time, from, to, long) {
+  const buy = to > from;
+  const text = from === 0 ? `${to > 0 ? '롱' : '숏'} 진입 ${Math.abs(to)}` : to === 0 ? '청산'
+    : (from > 0) !== (to > 0) ? `${to > 0 ? '롱' : '숏'} 전환 ${Math.abs(to)}` : `${buy ? '+' : '−'}${Math.abs(to - from)}${long ? ` → ${Math.abs(to)}` : ''}`;
+  return { time, position: buy ? 'belowBar' : 'aboveBar', shape: buy ? 'arrowUp' : 'arrowDown', color: buy ? UP : DOWN, text };
+}
+
 function renderMarkers() {
   const c = current();
   if (!c || !state.bars.length) return;
-  const step = state.interval * 60;
   const first = state.bars[0].time;
-  const markers = c.trades.filter((t) => t.to !== t.from && t.time >= first).map((t) => {
-    const buy = t.to > t.from;
-    return {
-      time: Math.floor(t.time / step) * step + TZ, position: buy ? 'belowBar' : 'aboveBar', shape: buy ? 'arrowUp' : 'arrowDown',
-      color: buy ? UP : DOWN, text: `${buy ? '매수' : '매도'} ${Math.abs(t.to - t.from)} → ${t.to > 0 ? '롱' : t.to < 0 ? '숏' : '없음'}${t.to ? ' ' + Math.abs(t.to) : ''}`,
-    };
-  }).sort((a, b) => a.time - b.time);
-  series.setMarkers(markers);
+  let markers;
+  if (state.interval === 'D') {
+    // 일봉: 규칙을 2021년부터 돌렸을 때의 자리(과거 시험) + 가상 계좌의 실제 매매(그날 종가로 정한 날짜에)
+    const days = new Map(((state.signals || {})[c.key] || []).filter((s) => s.time >= first).map((s) => [s.time, s]));
+    c.trades.filter((t) => t.to !== t.from).forEach((t) => {
+      const day = Date.parse(t.date) / 1000;  // 그날 0시(UTC): 일봉의 시각과 같다
+      days.set(day, { time: day, from: t.from, to: t.to });
+    });
+    markers = [...days.values()].map((s) => marker(s.time + TZ, s.from, s.to, false));
+  } else {
+    const step = state.interval * 60;
+    markers = c.trades.filter((t) => t.to !== t.from && t.time >= first).map((t) => marker(Math.floor(t.time / step) * step + TZ, t.from, t.to, true));
+  }
+  series.setMarkers(markers.sort((a, b) => a.time - b.time));
   if (entryLine) series.removePriceLine(entryLine);
   entryLine = c.contracts && c.entry ? series.createPriceLine({
     price: c.entry, color: c.contracts > 0 ? UP : DOWN, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
@@ -184,6 +207,7 @@ async function tickBars() {
 }
 async function tickTrading() {
   try {
+    if (!state.signals) state.signals = await api('/api/signals');
     state.trading = await api('/api/trading');
     renderSide();
   } catch (e) { /* 다음에 다시 */ }
@@ -196,6 +220,7 @@ function chooseInterval(key) {
   localStorage.setItem('mnqInterval', key);
   $('intervals').innerHTML = Object.entries(INTERVALS).map(([k, name]) =>
     `<button data-key="${k}" class="${k === key ? 'active' : ''}" aria-pressed="${k === key}">${name}</button>`).join('');
+  chart.applyOptions({ timeScale: { timeVisible: key !== 'D' } });
   $('chart-msg').hidden = false;
   loadBars(true).catch((e) => { $('chart-msg').textContent = '차트를 불러오지 못했습니다: ' + e.message; });
 }
@@ -234,5 +259,5 @@ $('picks').addEventListener('click', (ev) => {
 document.addEventListener('themechange', () => renderMarkers());
 chooseInterval(state.interval);
 tickTrading();
-setInterval(tickBars, 2000);
+setInterval(tickBars, 500);
 setInterval(tickTrading, 15000);

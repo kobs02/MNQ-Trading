@@ -65,7 +65,7 @@ def token(fresh=False):
     return _token["token"]
 
 
-def call(tr, body, cont_key=None, _retried=False):
+def call(tr, body, cont_key=None, _retried=False, _busy=0):
     """TR 하나를 보낸다: (응답, 다음 쪽을 이어 받을 키 또는 None)."""
     with _lock:
         wait = _last.get(tr, 0) + 1 / PER_SEC.get(tr, 1) + 0.05 - time.time()
@@ -81,7 +81,12 @@ def call(tr, body, cont_key=None, _retried=False):
         raise LSError(f"{tr}: 응답을 읽지 못했습니다({resp.status_code}): {resp.text[:300]}")
     if resp.status_code in (401, 403) and not _retried:  # 토큰이 만료됐거나 취소됐다
         token(fresh=True)
-        return call(tr, body, cont_key, _retried=True)
+        return call(tr, body, cont_key, _retried=True, _busy=_busy)
+    # 초당 한도는 앱키마다 세므로 다른 프로그램(서버와 연구 스크립트)이 같은 TR을 부르면 넘을 수 있다. 1초 쉬고 다시 보낸다.
+    # 주문 TR은 다시 보내면 두 번 접수될 수 있으므로 하지 않는다
+    if data.get("rsp_cd") == "IGW00201" and not tr.startswith("CIDBT") and _busy < 3:
+        time.sleep(1.1)
+        return call(tr, body, cont_key, _retried, _busy + 1)
     if resp.status_code != 200:
         raise LSError(f"{tr}: {data.get('rsp_cd')} {data.get('rsp_msg') or resp.text[:300]}")
     more = resp.headers.get("tr_cont") == "Y"

@@ -6,3 +6,4 @@ flask
 tzdata
 pystray
 pillow
+websocket-client

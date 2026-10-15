@@ -9,6 +9,8 @@ KEYS_PATH = ROOT / "keys.json"    # {"appkey": "...", "appsecret": "..."} 모의
 
 # 모의투자와 실거래는 주소가 같고 어느 앱키로 토큰을 받았는가로 갈린다
 BASE = "https://openapi.ls-sec.co.kr:8080"
+# 실시간(웹소켓)은 서버가 나뉜다: 모의투자 29443, 실거래 9443. 모의 토큰으로 9443에 붙으면 "서버정보(실전,모의)가 일치하지 않습니다"로 거절된다
+WS_URL = "wss://openapi.ls-sec.co.kr:29443/websocket"
 
 PRODUCT = "MNQ"  # CME Micro E-mini Nasdaq-100 (대회 상품). 1계약 = 지수 × 2달러, 최소 호가 0.25(0.5달러)
 MULTIPLIER = 2.0

@@ -37,7 +37,13 @@ def api_chart():
     key = request.args.get("interval", "1")
     if key not in chart.INTERVALS:
         raise ValueError(f"지원하지 않는 봉 단위: {key}")
-    return jsonify(chart.get_chart(key))
+    since = request.args.get("since")
+    return jsonify(chart.get_chart(key, int(since) if since else None))
+
+
+@app.get("/api/signals")
+def api_signals():
+    return jsonify(chart.signals())
 
 
 @app.get("/api/trading")

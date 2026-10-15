@@ -78,6 +78,22 @@ def windows(pnl):
             "mdd_median": float(np.median(m)), "mdd_p10": float(np.percentile(m, 10)), "score": float(np.mean(r + m))}
 
 
+def signals(key, px, since="2021-01-01"):
+    """그 후보의 규칙을 since부터 돌렸을 때 계약 수가 바뀐 날들: [{time, from, to, price}].
+
+    계좌는 늘 시작 금액(config.CAPITAL)이고 1계약 = 그날 지수 × 2달러로 본다(차트에 진입·청산 자리를 보여 주는 용도).
+    날짜는 그날 종가로 정한 것이고, 실제로는 그 직후(뉴욕 16:10)에 맞춘다.
+    """
+    expo = exposure(key, px) * config.CANDIDATES[key]["lever"]
+    want = (expo * config.CAPITAL / (px * config.MULTIPLIER)).round().astype(int)
+    out, held = [], 0
+    for day, n in want[since:].items():
+        if n != held:
+            out.append({"time": int(day.timestamp()), "from": int(held), "to": int(n), "price": float(px[day])})
+            held = int(n)
+    return out
+
+
 def backtest(key, px):
     """과거 시험: 그래프용 곡선(배율 적용), 설계·확인 구간과 연도별 성적, 4주 구간 분포."""
     lever = config.CANDIDATES[key]["lever"]
