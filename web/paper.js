@@ -12,6 +12,10 @@ const fmtTime = (sec) => new Date(sec * 1000).toLocaleString('ko-KR', { month: '
 const fmtAge = (days) => (days < 1 ? (days * 24).toFixed(1) + '시간' : days.toFixed(1) + '일');
 const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const TABS = { trades: '매매 기록', backtest: '과거 시험', compare: '후보 비교', method: '방식과 한계' };
+const SLEEVES = { daily: '일봉', intraday: '장중' };
+// 갈래가 둘인 후보(섞기): "일봉 롱 1 · 장중 숏 1"
+const partsText = (parts) => (parts && 'intraday' in parts ? Object.entries(parts).map(([k, n]) => `${SLEEVES[k]} ${n > 0 ? '롱' : n < 0 ? '숏' : ''}${n ? ' ' + Math.abs(n) : '없음'}`).join(' · ') : '');
+const lastPeriod = (c) => Object.entries(c.backtest.periods).slice(-1)[0];
 const position = (n) => (n > 0 ? `<span class="c-up">롱 ${n}계약</span>` : n < 0 ? `<span class="c-down">숏 ${-n}계약</span>` : '없음');
 
 const state = {
@@ -66,14 +70,16 @@ function windowsHtml(c) {
     <th>MDD 중앙값</th><th>MDD 하위 10%</th><th>수익 + MDD 평균</th><th>샤프(연)</th></tr></thead>
     <tbody>${Object.entries(c.backtest.periods).map(([name, p]) => row(name, p)).join('')}</tbody></table></div>
     <p class="hint">4주 구간은 5거래일씩 밀면서 잘랐습니다. MDD는 구간 시작부터 잰 일별 종가 기준입니다(장중 낙폭은 더 큽니다). "수익 + MDD"는 대회의 종합 점수를 대신한 간단한 값입니다.
-      규칙은 2019년까지만 보고 골랐고, 2020년 이후는 확인용입니다. 계좌 대비 노출을 소수로 계산했으므로 정수 계약과는 조금 다릅니다.</p>`;
+      ${Object.keys(c.backtest.periods).length > 1 ? '규칙은 2019년까지만 보고 골랐고, 2020년 이후는 확인용입니다.'
+        : '<b>이 후보는 1시간봉 2년치 전체를 보고 고른 것이라 확인용 구간이 따로 없습니다.</b> 실제보다 좋게 나왔을 수 있습니다.'}
+      계좌 대비 노출을 소수로 계산했으므로 정수 계약과는 조금 다릅니다.</p>`;
 }
 
 // ---------- 탭 ----------
 function tradesHtml(d, c) {
   if (!c.trades || !c.trades.length) return `<p class="empty">아직 결정한 적이 없습니다. 평일 뉴욕 16:10(${fmtTime(d.next_decision)})에 그날 종가로 첫 결정을 합니다.</p>`;
-  return `<div class="journal"><table class="trend-table"><thead><tr><th>결정한 때</th><th>나스닥100 종가</th><th>목표 노출</th><th>포지션</th><th>MNQ 가격</th><th>비용</th></tr></thead>
-    <tbody>${c.trades.map((t) => `<tr><td>${fmtTime(t.time)} <small>(${t.date} 종가)</small></td><td>${fmtPrice(t.close)}</td><td>${t.expo.toFixed(2)}배</td>
+  return `<div class="journal"><table class="trend-table"><thead><tr><th>결정한 때</th><th>갈래</th><th>근거</th><th>목표 노출</th><th>포지션</th><th>MNQ 가격</th><th>비용</th></tr></thead>
+    <tbody>${c.trades.map((t) => `<tr><td>${fmtTime(t.time)}</td><td>${SLEEVES[t.sleeve || 'daily']}</td><td style="text-align: left">${t.why || `${t.date} 종가 ${fmtPrice(t.close)}`}</td><td>${t.expo.toFixed(2)}배</td>
       <td>${t.from === t.to ? `${position(t.to)} <small>그대로</small>` : `${position(t.from)} → <b>${position(t.to)}</b>`}</td><td>${fmtPrice(t.price)}</td>
       <td class="c-down">${t.fee ? fmtMoney(-t.fee) : '-'}</td></tr>`).join('')}</tbody></table></div>
     <p class="hint">목표 노출(계좌 대비 배수)을 그때의 계좌 금액과 MNQ 가격으로 정수 계약으로 바꿨습니다. 1계약 = MNQ 가격 × $${d.multiplier}. 비용은 계약당 ${fmtMoney(d.fee)}로 잡았습니다.</p>`;
@@ -93,23 +99,23 @@ function backtestHtml(d, c) {
     <div class="journal"><table class="trend-table"><thead><tr><th>연도</th>${years.map((y) => `<th>${y}</th>`).join('')}</tr></thead><tbody>
     <tr><td>수익률</td>${years.map((y) => `<td class="${tone(bt.years[y].total)}">${fmtSigned(bt.years[y].total, 0)}</td>`).join('')}</tr>
     <tr><td>최대 낙폭</td>${years.map((y) => `<td class="c-down">${fmtPct(bt.years[y].drawdown, 0)}</td>`).join('')}</tr></tbody></table></div>
-    <p class="hint">나스닥100 지수(^NDX) 일봉 종가로 계산했습니다. t일 종가로 정한 노출을 다음 날 수익률에 적용하고, 노출이 바뀐 만큼 0.01%를 뗐습니다.
-      선물은 지수보다 배당·금리만큼(4주에 0.1 ~ 0.3%) 다르게 움직입니다. ${fmtDay(bt.until)}까지.</p>`;
+    <p class="hint">${bt.note}. 정한 노출을 다음 봉부터 적용하고 노출이 바뀐 만큼 비용을 뗐습니다. ${fmtDay(bt.until)}까지.</p>`;
 }
 
 function compareHtml(d) {
   const row = (c) => {
-    const w = c.backtest.periods['확인 2020 ~'].windows, s = c.backtest.periods['확인 2020 ~'].stats;
+    const [period, p] = lastPeriod(c);
+    const w = p.windows, s = p.stats;
     const r = ret(c, d.capital);
     const on = c.key === state.candidate;
     return `<tr tabindex="0" data-key="${c.key}" class="${on ? 'fresh' : ''}"${on ? ' aria-current="true"' : ''}>
-      <td><b>${c.name}</b></td><td>${position(c.signal.contracts || 0)}</td>
+      <td><b>${c.name}</b><br><small>${period}</small></td><td>${position(c.signal.contracts || 0)}</td>
       <td class="${tone(r || 0)}">${r == null ? '-' : `<b>${fmtSigned(r, 2)}</b>`}</td><td class="c-down">${c.drawdown == null ? '-' : fmtPct(c.drawdown, 1)}</td>
       <td class="${tone(w.ret_median)}">${fmtSigned(w.ret_median, 2)}</td><td class="c-down">${fmtPct(w.mdd_median, 1)}</td>
       <td class="${tone(w.score)}"><b>${fmtSigned(w.score, 2)}</b></td><td>${s.sharpe.toFixed(2)}</td></tr>`;
   };
   return `<div class="journal"><table class="trend-table compare">
-      <thead><tr><th rowspan="2">후보</th><th rowspan="2">지금 신호</th><th colspan="2" class="span">모의 운용</th><th colspan="4" class="span">과거 시험 4주 구간 (2020 ~)</th></tr>
+      <thead><tr><th rowspan="2">후보</th><th rowspan="2">지금 신호</th><th colspan="2" class="span">모의 운용</th><th colspan="4" class="span">과거 시험 4주 구간 (후보마다 마지막 구간)</th></tr>
       <tr><th>수익률</th><th>최대 낙폭</th><th>수익률 중앙값</th><th>MDD 중앙값</th><th>수익 + MDD</th><th>샤프(연)</th></tr></thead>
       <tbody>${d.candidates.map(row).join('')}</tbody></table></div>
     <p class="hint">줄을 누르면 그 후보로 바뀝니다. "지금 신호"는 마지막 종가(${d.close[0]})로 정한 노출을 지금 계좌와 가격으로 바꾼 계약 수입니다.</p>`;
@@ -154,7 +160,7 @@ function renderChart(d, c) {
   chart.timeScale().fitContent();
   $('chart-note').innerHTML = live
     ? `<span>한 시간마다 그때의 MNQ 가격으로 계산한 가상 계좌(${fmtMoney(d.capital, 0)} 시작)</span>`
-    : `<span>같은 규칙을 2000년부터의 나스닥100 일봉에 돌린 결과(${fmtMoney(d.capital, 0)} 시작, 세로축은 로그)</span>`;
+    : `<span>같은 규칙을 과거 데이터에 돌린 결과(${fmtMoney(d.capital, 0)} 시작, 세로축은 로그): ${c.backtest.note}</span>`;
 }
 
 function render() {
@@ -181,11 +187,11 @@ function render() {
     const notional = d.price ? Math.abs(c.contracts) * d.price * d.multiplier : 0;
     $('kpis').innerHTML = `
       <div class="kpi main"><span>${fmtMoney(d.capital, 0)}로 시작한 가상 계좌</span><b>${fmtMoney(c.equity)}</b><em class="${tone(r)}">${fmtSigned(r, 2)}</em></div>
-      <div class="kpi"><span>지금 포지션</span><b>${position(c.contracts)}</b><small>노출 ${(notional / c.equity).toFixed(2)}배 · ${fmtMoney(notional, 0)}</small></div>
+      <div class="kpi"><span>지금 포지션</span><b>${position(c.contracts)}</b><small>${partsText(c.parts) ? partsText(c.parts) + ' · ' : ''}노출 ${(notional / c.equity).toFixed(2)}배 · ${fmtMoney(notional, 0)}</small></div>
       <div class="kpi"><span>최대 낙폭</span><b class="c-down">${fmtPct(c.drawdown, 2)}</b><small>시간별 기록 기준</small></div>
       <div class="kpi"><span>${d.symbol || 'MNQ'}</span><b>${fmtPrice(d.price)}</b><small>${d.price_at ? fmtTime(d.price_at) : ''}</small></div>
       <div class="kpi"><span>다음 결정</span><b>${new Date(d.next_decision * 1000).toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit' })}</b>
-        <small>${new Date(d.next_decision * 1000).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })} · 지금 신호 ${position(c.signal.contracts || 0)}</small></div>`;
+        <small>${new Date(d.next_decision * 1000).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })} · 일봉 신호 ${position(c.signal.contracts || 0)}${c.intraday ? ' · 장중은 평일 뉴욕 10 ~ 15시 정시' : ''}</small></div>`;
   }
   $('summary').innerHTML = windowsHtml(c);
   renderChart(d, c);

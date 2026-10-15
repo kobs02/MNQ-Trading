@@ -32,8 +32,84 @@ RULES = {
 
 
 def exposure(key, px):
-    """종가 표 px로 정한 날마다의 노출(배율 적용 전)."""
+    """종가 표 px로 정한 날마다의 노출(배율 적용 전). 섞기 후보는 일봉 갈래의 것."""
     return RULES[config.CANDIDATES[key]["rule"]](px).fillna(0.0)
+
+
+# ---------- 장중 갈래: 노이즈 영역 돌파 (Zarattini·Aziz·Barbon 2024를 1시간봉으로 줄인 것) ----------
+# 날마다 9시(뉴욕) 봉의 시가를 기준으로, 시가 대비 움직임이 지난 NOISE_DAYS일 같은 시각 |움직임| 평균의 k배 밖이면 그 방향으로 든다.
+# 판단은 10 ~ 15시 정시(9 ~ 14시 봉이 마감된 때), 다음 한 시간을 들고, 16시에 모두 정리한다. 연구: research/r4_mix.py
+NOISE_DAYS = 14
+INTRADAY_HOURS = range(10, 16)  # 판단 시각(뉴욕). 16시에 정리
+
+
+def moves(frame):
+    """1시간봉 표(뉴욕 시각, 봉 시작 시각이 색인, open·close) → 날짜 × 봉 시작 시(9 ~ 15)의 '9시 시가 대비 종가 움직임' 표."""
+    rth = frame[(frame.index.hour >= 9) & (frame.index.hour <= 15) & (frame.index.dayofweek < 5)]
+    date = rth.index.normalize()
+    opens = rth[rth.index.hour == 9]["open"]
+    opens.index = opens.index.normalize()
+    table = pd.DataFrame({"date": date, "hour": rth.index.hour, "m": rth["close"].to_numpy() / opens.reindex(date).to_numpy() - 1})
+    return table.pivot_table(index="date", columns="hour", values="m")
+
+
+def noise_side(table, date, hour, k):
+    """date의 hour시(판단 시각)에 들 방향: +1 롱, -1 숏, 0 쉼. 그날 9시 봉이나 hour-1시 봉이 없으면 None."""
+    bar = hour - 1
+    if date not in table.index or bar not in table.columns or np.isnan(table.at[date, bar]):
+        return None
+    past = table.loc[table.index < date, bar].dropna().tail(NOISE_DAYS)
+    if len(past) < NOISE_DAYS:
+        return None
+    m, n = table.at[date, bar], past.abs().mean()
+    return 1 if m > k * n else -1 if m < -k * n else 0
+
+
+def hourly():
+    """나스닥100 선물 1시간봉(야후 NQ=F, 최근 2년, 뉴욕 시각, 정시 시작). 6시간마다 새로. 섞기 후보의 과거 시험용."""
+    path = config.STORE / "data" / "NQF_1h.pkl"
+    if not path.exists() or time.time() - path.stat().st_mtime > 6 * 3600:
+        import yfinance as yf
+        df = yf.download("NQ=F", period="730d", interval="1h", progress=False, auto_adjust=False, multi_level_index=False)
+        if len(df) > 1000:
+            df.to_pickle(path)
+    h = pd.read_pickle(path)
+    h = h[h.index.minute == 0].rename(columns=str.lower)
+    h.index = h.index.tz_localize(None)
+    return h
+
+
+def mix_pnl(key, px):
+    """섞기 후보의 시간별 손익(1시간봉): 일봉 갈래 × lever + 장중 갈래 × intraday lever. research/r4_mix.py와 같다."""
+    cand = config.CANDIDATES[key]
+    h = hourly()
+    ret = h["close"].pct_change()
+    gap = h.index.to_series().diff() > pd.Timedelta(hours=1)
+    ret[(gap & (h.index.hour != 18)) | (ret.abs() > 0.05)] = np.nan  # 롤오버 틈
+    ret = ret.fillna(0.0)
+    # 일봉 갈래: t일 16:00에 정한 노출을 t일 16:00 ~ t+1일 16:00에 든다
+    expo = exposure(key, px) * cand["lever"]
+    day = pd.DatetimeIndex(ret.index.normalize())
+    held = expo.shift(1).reindex(day, method="ffill").to_numpy()
+    after = ret.index.hour >= 16
+    held[after] = expo.reindex(day[after], method="ffill").to_numpy()
+    held = pd.Series(np.nan_to_num(held), index=ret.index)
+    pnl = held * ret - held.diff().abs().fillna(0.0) * COST * 0.5  # 비용: 노출이 바뀐 만큼 한쪽 0.005%(research/r4_mix.py와 같다)
+    # 장중 갈래
+    table, side_lever, k = moves(h), cand["intraday"]["lever"], cand["intraday"]["k"]
+    for date in table.index:
+        pos, last = 0, None
+        for hour in INTRADAY_HOURS:
+            ts = date + pd.Timedelta(hours=hour)
+            side = noise_side(table, date, hour, k)
+            if side is None or ts not in ret.index:
+                continue
+            want = side * side_lever
+            pnl[ts] += want * ret[ts] - abs(want - pos) * COST * 0.5
+            pos, last = want, ts
+        if last is not None:
+            pnl[last] -= abs(pos) * COST * 0.5
+    return pnl
 
 
 def history():
@@ -95,16 +171,27 @@ def signals(key, px, since="2021-01-01"):
 
 
 def backtest(key, px):
-    """과거 시험: 그래프용 곡선(배율 적용), 설계·확인 구간과 연도별 성적, 4주 구간 분포."""
-    lever = config.CANDIDATES[key]["lever"]
-    expo = exposure(key, px) * lever
-    ret = px.pct_change().fillna(0.0)
-    pnl = (expo.shift(1).fillna(0.0) * ret - COST * expo.diff().abs().fillna(0.0))["2000":]
+    """과거 시험: 그래프용 곡선(배율 적용), 구간별·연도별 성적, 4주 구간 분포.
+
+    일봉 후보는 나스닥100 지수 일봉(2000 ~), 섞기 후보는 장중 갈래 때문에 NQ=F 1시간봉(최근 2년)으로 한다. 마지막 구간이 확인용이다."""
+    cand = config.CANDIDATES[key]
+    if "intraday" in cand:
+        hp = mix_pnl(key, px)
+        pnl = hp.groupby(hp.index.normalize()).sum()
+        pnl = pnl[pnl.index.dayofweek < 5]
+        periods = {f"1시간봉 {pnl.index[0]:%Y-%m} ~": (None, None)}
+        note = f"나스닥100 선물(NQ=F) 1시간봉 {pnl.index[0]:%Y-%m-%d} ~. 장중 갈래 때문에 2년치뿐이라 일봉 후보들보다 근거가 약하다"
+    else:
+        expo = exposure(key, px) * cand["lever"]
+        ret = px.pct_change().fillna(0.0)
+        pnl = (expo.shift(1).fillna(0.0) * ret - COST * expo.diff().abs().fillna(0.0))["2000":]
+        periods = {"설계 2000 ~ 2019": ("2000", "2019"), "확인 2020 ~": ("2020", None)}
+        note = "나스닥100 지수(^NDX) 일봉 2000 ~. 선물은 지수보다 배당·금리만큼(4주에 0.1 ~ 0.3%) 다르게 움직인다"
     eq = (1 + pnl).cumprod()
     return {
+        "note": note,
         "curve": [[int(t.timestamp()), float(v)] for t, v in eq.items()],
-        "periods": {name: {"stats": stats(pnl[a:b]), "windows": windows(pnl[a:b])}
-                    for name, (a, b) in (("설계 2000 ~ 2019", ("2000", "2019")), ("확인 2020 ~", ("2020", None)))},
+        "periods": {name: {"stats": stats(pnl[a:b]), "windows": windows(pnl[a:b])} for name, (a, b) in periods.items()},
         "years": {int(y): {"total": float((1 + g).prod() - 1), "drawdown": float(((1 + g).cumprod() / (1 + g).cumprod().cummax() - 1).min())}
                   for y, g in pnl.groupby(pnl.index.year)},
         "until": int(px.index[-1].timestamp()),

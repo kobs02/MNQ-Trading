@@ -9,6 +9,8 @@ const fmtMoney = (v, digits = 2) => (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleS
 const fmtSigned = (v, digits = 2) => (v == null ? '-' : (v >= 0 ? '+' : '') + (v * 100).toFixed(digits) + '%');
 const fmtTime = (sec) => new Date(sec * 1000).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const tone = (v) => (v > 0 ? 'c-up' : v < 0 ? 'c-down' : '');
+const SLEEVES = { daily: '일봉', intraday: '장중' };
+const partsText = (parts) => (parts && 'intraday' in parts ? Object.entries(parts).map(([k, n]) => `${SLEEVES[k]} ${n > 0 ? '롱' : n < 0 ? '숏' : ''}${n ? ' ' + Math.abs(n) : '없음'}`).join(' · ') : '');
 const position = (n) => (n > 0 ? `<span class="c-up">롱 ${n}계약</span>` : n < 0 ? `<span class="c-down">숏 ${-n}계약</span>` : '없음');
 const INTERVALS = { 1: '1분', 5: '5분', 15: '15분', 60: '1시간', D: '일봉' };
 const UP = '#26a69a', DOWN = '#ef5350';
@@ -177,6 +179,7 @@ function renderSide() {
   const notional = price ? Math.abs(c.contracts) * price * d.multiplier : 0;
   $('pos-note').textContent = c.started ? `${fmtTime(c.started)} 시작` : '';
   $('position').innerHTML = `<div class="pos-big">${position(c.contracts)}</div>` + rows([
+    ...(partsText(c.parts) ? [['갈래별', partsText(c.parts)]] : []),
     ['평균 진입가', c.entry && c.contracts ? fmtPrice(c.entry) : '-'],
     ['평가손익', c.contracts ? `<b class="${tone(pnl)}">${fmtMoney(pnl)}</b>` : '-'],
     ['노출', `${(notional / c.equity).toFixed(2)}배 · ${fmtMoney(notional, 0)}`],
@@ -186,14 +189,15 @@ function renderSide() {
   const want = c.signal.contracts;
   const move = want == null ? null : want - c.contracts;
   $('next').innerHTML = rows([
-    ['결정 시각', `<b>${fmtTime(d.next_decision)}</b>`],
+    ...(c.next_intraday ? [['장중 판단', `<b>${fmtTime(c.next_intraday)}</b> <small>(평일 뉴욕 10 ~ 15시 정시, 16시 정리)</small>`]] : []),
+    [c.next_intraday ? '일봉 결정' : '결정 시각', `<b>${fmtTime(d.next_decision)}</b>`],
     ['지금 신호', `${position(want || 0)} <small>(노출 ${c.signal.expo.toFixed(2)}배, ${d.close[0]} 종가 기준)</small>`],
     ['지금 결정하면', move == null ? '-' : move === 0 ? '그대로' : `<b class="${tone(move)}">${move > 0 ? '매수' : '매도'} ${Math.abs(move)}계약</b>`],
   ]) + (d.error ? `<div class="note warn">${d.error}</div>` : '');
 
   $('trades').innerHTML = c.trades.length ? `<table class="trend-table"><thead><tr><th>때</th><th>매매</th><th>가격</th></tr></thead><tbody>${c.trades.slice(0, 20).map((t) => {
     const move = t.to - t.from;
-    return `<tr><td>${fmtTime(t.time)}</td><td>${move ? `<b class="${tone(move)}">${move > 0 ? '매수' : '매도'} ${Math.abs(move)}</b> → ${position(t.to)}` : `그대로 ${position(t.to)}`}</td><td>${fmtPrice(t.price)}</td></tr>`;
+    return `<tr><td>${fmtTime(t.time)}${t.sleeve === 'intraday' ? ' <small>장중</small>' : ''}</td><td>${move ? `<b class="${tone(move)}">${move > 0 ? '매수' : '매도'} ${Math.abs(move)}</b> → ${position(t.to)}` : `그대로 ${position(t.to)}`}</td><td>${fmtPrice(t.price)}</td></tr>`;
   }).join('')}</tbody></table>` : `<p class="empty">아직 자동매매가 없습니다. 첫 결정은 ${fmtTime(d.next_decision)}입니다.</p>`;
   renderMarkers();
 }
