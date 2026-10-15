@@ -8,7 +8,7 @@ import sys
 import threading
 import webbrowser
 
-from mnq import chart, config, console, paper, tray
+from mnq import chart, config, console, live, paper, tray
 from mnq.server import app
 
 log = logging.getLogger(__name__)
@@ -50,5 +50,6 @@ if __name__ == "__main__":
     threading.Timer(1.5, webbrowser.open, args=(url,)).start()
     paper.run()      # 가상 계좌: 1분마다 시세, 평일 뉴욕 16:10에 결정
     chart.start()    # 실시간 체결 웹소켓: 차트의 마지막 봉과 현재가를 체결마다 고친다
+    live.run()       # LS 모의계좌 자동 주문: 대회 시작(config.LIVE) 뒤부터 가상 계좌를 따라 주문한다
     tray.start(url)  # 작업 표시줄 알림 영역의 아이콘: 서버가 켜져 있는 동안 떠 있다
     app.run(host=config.HOST, port=config.PORT, threaded=True)

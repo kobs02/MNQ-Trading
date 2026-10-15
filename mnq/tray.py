@@ -8,7 +8,7 @@ import os
 import time
 import webbrowser
 
-from . import config, paper
+from . import config, live, paper
 
 PICTURE = config.ROOT / "icon_png.png"
 COLORS = {True: (46, 204, 138), False: (240, 180, 60)}
@@ -63,6 +63,7 @@ def start(url):
     icon = pystray.Icon("mnq-trader", image(active), title, menu=pystray.Menu(
         pystray.MenuItem("실시간 차트 열기", lambda: webbrowser.open(url + "/chart.html"), default=True),  # 아이콘을 두 번 눌러도 열린다
         pystray.MenuItem("모의 운용 열기", lambda: webbrowser.open(url + "/paper.html")),
+        pystray.MenuItem("LS 모의계좌 자동 주문", lambda: live.set_enabled(not live.enabled()), checked=lambda item: live.enabled()),
         pystray.MenuItem("서버 끄기", quit_server),
     ))
     icon.run_detached(setup=watch)

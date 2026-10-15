@@ -235,9 +235,22 @@ async function tickBars() {
     $('conn').className = 'conn down';
   }
 }
+// LS 모의계좌: 따라가는 후보, 목표와 실제 계약 수, 지금 주문하지 않는 까닭, 최근 주문
+function renderLive(d) {
+  const name = state.trading ? (state.trading.candidates.find((c) => c.key === d.candidate) || {}).name || d.candidate : d.candidate;
+  $('live-note').textContent = d.enabled ? (d.started ? '켜짐' : `${fmtTime(d.start)} 대회 시작부터`) : '꺼짐(작업 표시줄 아이콘에서 켬)';
+  const orders = d.orders.slice(0, 5).map((o) => `<tr><td>${fmtTime(o.time)}</td><td>${o.ok ? `<b class="${tone(o.qty)}">${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}</b> (${o.from} → ${o.to})` : `<span class="c-down">실패</span> ${o.error || ''}`}</td></tr>`).join('');
+  $('live').innerHTML = rows([
+    ['따라가는 후보', `<b>${name.split(' · ')[0]}</b>`],
+    ['목표 / 실제', d.target == null ? '-' : `${position(d.target)} / ${position(d.actual)}`],
+    ['상태', d.error ? `<span class="c-down">${d.error}</span>` : d.note || '-'],
+  ]) + (orders ? `<table class="trend-table"><tbody>${orders}</tbody></table>` : '<p class="empty">아직 주문이 없습니다.</p>');
+}
+
 async function tickTrading() {
   try {
     if (!state.signals) state.signals = await api('/api/signals');
+    api('/api/live').then(renderLive).catch(() => {});
     state.trading = await api('/api/trading');
     renderSide();
   } catch (e) { /* 다음에 다시 */ }
