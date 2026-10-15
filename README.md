@@ -22,7 +22,8 @@
    .venv\Scripts\pip install -r requirements.txt
    ```
 4. 연결 점검(읽기만 한다): `.venv\Scripts\python check.py`
-5. 서버: `.venv\Scripts\python -m mnq.server` → http://127.0.0.1:8775
+5. 서버: 바탕화면의 "MNQ Trader 서버" 바로가기(`start_server.bat`) 또는 `.venv\Scripts\python -m mnq.server` → http://127.0.0.1:8775
+   창을 닫으면 서버와 가상 계좌의 자동매매가 멈춘다
 
 ## 화면
 
