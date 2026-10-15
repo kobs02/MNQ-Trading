@@ -67,7 +67,10 @@ def _set(key, acct, sleeve, n, price, now, record):
     """갈래 sleeve의 계약 수를 n으로 바꾸고, 계좌 전체(갈래의 합)를 그만큼 사고판다. record: 매매 기록에 덧붙일 내용."""
     parts = acct.setdefault("parts", {"daily": acct["contracts"]})
     parts[sleeve] = n
+    cap = config.CANDIDATES[key].get("max_contracts")
     held, want = acct["contracts"], sum(parts.values())
+    if cap:
+        want = max(-cap, min(cap, want))  # 갈래들을 더한 포지션의 상한
     trade = want - held
     fee = abs(trade) * config.FEE_PER_CONTRACT
     acct["equity"] -= fee

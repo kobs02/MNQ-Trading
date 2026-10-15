@@ -65,6 +65,20 @@ def noise_side(table, date, hour, k):
     return 1 if m > k * n else -1 if m < -k * n else 0
 
 
+def noise_sides(table, k):
+    """noise_side를 표 전체에 한 번에: 날짜 × 판단 시각(10 ~ 15)의 방향(+1, -1, 0, 계산할 수 없으면 NaN). 과거 시험용."""
+    out = pd.DataFrame(np.nan, index=table.index, columns=list(INTRADAY_HOURS))
+    for hour in INTRADAY_HOURS:
+        if hour - 1 not in table.columns:
+            continue
+        col = table[hour - 1]
+        valid = col.dropna()
+        noise = valid.abs().rolling(NOISE_DAYS).mean().shift(1).reindex(col.index)  # 그날 전까지 값이 있는 날 NOISE_DAYS개의 평균
+        side = np.where(col > k * noise, 1.0, np.where(col < -k * noise, -1.0, 0.0))
+        out[hour] = np.where(col.notna() & noise.notna(), side, np.nan)
+    return out
+
+
 def hourly():
     """나스닥100 선물 1시간봉(야후 NQ=F, 최근 2년, 뉴욕 시각, 정시 시작). 6시간마다 새로. 섞기 후보의 과거 시험용."""
     path = config.STORE / "data" / "NQF_1h.pkl"
@@ -79,37 +93,32 @@ def hourly():
     return h
 
 
-def mix_pnl(key, px):
-    """섞기 후보의 시간별 손익(1시간봉): 일봉 갈래 × lever + 장중 갈래 × intraday lever. research/r4_mix.py와 같다."""
+def mix_pnl(key, px, levers=None, cap=None):
+    """섞기 후보의 시간별 손익(1시간봉). 두 갈래의 노출을 시간마다 더하고, 그 합을 ±cap(계좌 대비)으로 자른 뒤 손익과 비용을 계산한다.
+    비용은 합친 노출이 바뀐 만큼(한 계좌라 갈래끼리 반대면 상쇄된다). levers=(일봉 몫, 장중 몫), cap은 연구에서 바꿔 볼 때만 준다."""
     cand = config.CANDIDATES[key]
+    a, b = levers or (cand["lever"], cand["intraday"]["lever"])
+    if cap is None and cand.get("max_contracts"):
+        cap = cand["max_contracts"] * max(a, b)  # 한 갈래 몫(1계약)이 상한
     h = hourly()
     ret = h["close"].pct_change()
     gap = h.index.to_series().diff() > pd.Timedelta(hours=1)
     ret[(gap & (h.index.hour != 18)) | (ret.abs() > 0.05)] = np.nan  # 롤오버 틈
     ret = ret.fillna(0.0)
     # 일봉 갈래: t일 16:00에 정한 노출을 t일 16:00 ~ t+1일 16:00에 든다
-    expo = exposure(key, px) * cand["lever"]
+    expo = exposure(key, px) * a
     day = pd.DatetimeIndex(ret.index.normalize())
     held = expo.shift(1).reindex(day, method="ffill").to_numpy()
     after = ret.index.hour >= 16
     held[after] = expo.reindex(day[after], method="ffill").to_numpy()
-    held = pd.Series(np.nan_to_num(held), index=ret.index)
-    pnl = held * ret - held.diff().abs().fillna(0.0) * COST * 0.5  # 비용: 노출이 바뀐 만큼 한쪽 0.005%(research/r4_mix.py와 같다)
-    # 장중 갈래
-    table, side_lever, k = moves(h), cand["intraday"]["lever"], cand["intraday"]["k"]
-    for date in table.index:
-        pos, last = 0, None
-        for hour in INTRADAY_HOURS:
-            ts = date + pd.Timedelta(hours=hour)
-            side = noise_side(table, date, hour, k)
-            if side is None or ts not in ret.index:
-                continue
-            want = side * side_lever
-            pnl[ts] += want * ret[ts] - abs(want - pos) * COST * 0.5
-            pos, last = want, ts
-        if last is not None:
-            pnl[last] -= abs(pos) * COST * 0.5
-    return pnl
+    total = pd.Series(np.nan_to_num(held), index=ret.index)
+    # 장중 갈래: hour시(10 ~ 15)에 정한 방향을 그 시간 봉(hour ~ hour+1시) 동안 든다. 16시 봉부터는 0
+    sides = noise_sides(moves(h), cand["intraday"]["k"]).stack()  # (날짜, 시각) → 방향
+    stamps = pd.DatetimeIndex([d + pd.Timedelta(hours=hr) for d, hr in sides.index])
+    total = total.add(pd.Series(sides.to_numpy() * b, index=stamps).reindex(total.index).fillna(0.0))
+    if cap:
+        total = total.clip(-cap, cap)
+    return total * ret - total.diff().abs().fillna(0.0) * COST * 0.5  # 비용: 노출이 바뀐 만큼 한쪽 0.005%
 
 
 def history():
