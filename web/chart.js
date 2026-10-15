@@ -24,6 +24,8 @@ const state = {
   trading: null,
   signals: null,     // 후보마다 2021년부터 규칙대로 계약 수를 바꾼 날들(일봉에 표시)
   generation: 0,     // 봉 단위를 바꿀 때마다 늘린다. 늦게 온 이전 응답을 버리는 용도
+  loadingOlder: false,
+  noOlder: false,    // 더 과거의 봉이 서버(LS)에 없다
 };
 
 async function api(path) {
@@ -76,6 +78,30 @@ async function loadBars(fresh) {
   renderMarkers();
   if (!legendHover) renderLegend(d.bars[d.bars.length - 1]);
 }
+
+// 화면을 왼쪽 끝 가까이까지 끌면 그 이전 봉을 받아 앞에 붙인다. 보고 있던 자리는 그대로 둔다
+async function loadOlder() {
+  if (state.loadingOlder || state.noOlder || state.interval === 'D' || !state.bars.length) return;
+  state.loadingOlder = true;
+  const gen = state.generation;
+  try {
+    const d = await api(`/api/chart/older?interval=${state.interval}`);
+    if (gen !== state.generation) return;
+    state.noOlder = d.done;
+    if (d.bars.length) {
+      const range = chart.timeScale().getVisibleLogicalRange();
+      state.bars = d.bars.concat(state.bars);
+      series.setData(state.bars.map(shifted));
+      if (range) chart.timeScale().setVisibleLogicalRange({ from: range.from + d.bars.length, to: range.to + d.bars.length });
+      renderMarkers();
+    }
+  } catch (e) { /* 다음에 끌 때 다시 */ } finally {
+    state.loadingOlder = false;
+  }
+}
+chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+  if (range && range.from < 30) loadOlder();
+});
 
 let legendHover = false;
 function renderLegend(b) {
@@ -217,6 +243,7 @@ function chooseInterval(key) {
   state.interval = key;
   state.generation += 1;
   state.last = null;
+  state.noOlder = key === 'D';
   localStorage.setItem('mnqInterval', key);
   $('intervals').innerHTML = Object.entries(INTERVALS).map(([k, name]) =>
     `<button data-key="${k}" class="${k === key ? 'active' : ''}" aria-pressed="${k === key}">${name}</button>`).join('');

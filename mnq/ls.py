@@ -113,10 +113,14 @@ def quote(symbol):
     return data["o3105OutBlock"]
 
 
-def minute_bars(symbol, minutes=1, count=500):
-    """최근 분봉(오래된 것부터). date·time은 거래소(시카고) 시각이고 봉이 끝나는 시각이다.
-    t: 봉이 시작한 시각(유닉스 초). 응답의 timediff(거래소 시각 - 한국 시각, 시간)로 바꾼다."""
-    rows, cts_date, cts_time, key = [], "", "", None
+def minute_bars(symbol, minutes=1, count=500, cont=None, more=False):
+    """분봉(오래된 것부터). date·time은 거래소(시카고) 시각이고 봉이 끝나는 시각이다.
+    t: 봉이 시작한 시각(유닉스 초). 응답의 timediff(거래소 시각 - 한국 시각, 시간)로 바꾼다.
+
+    최근 것부터 거슬러 받는다. more=True면 그보다 더 오래된 봉을 이어 받을 열쇠 cont(없으면 None)도 함께 돌려준다:
+    minute_bars(..., cont=그 열쇠, more=True)로 부르면 거기서부터 더 과거로 받는다."""
+    rows = []
+    cts_date, cts_time, key = cont or ("", "", None)
     while len(rows) < count:
         data, key = call("o3103", {"o3103InBlock": {"shcode": symbol, "ncnt": minutes, "readcnt": min(500, count - len(rows)),
                                                     "cts_date": cts_date, "cts_time": cts_time}}, key)
@@ -129,8 +133,10 @@ def minute_bars(symbol, minutes=1, count=500):
         rows += part
         cts_date, cts_time = head.get("cts_date", ""), head.get("cts_time", "")
         if not key or not part:
+            key = None
             break
-    return sorted(rows, key=lambda r: r["t"])
+    rows.sort(key=lambda r: r["t"])
+    return (rows, (cts_date, cts_time, key) if key else None) if more else rows
 
 
 # ---------- 계좌 ----------

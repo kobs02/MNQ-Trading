@@ -10,12 +10,14 @@ from . import config, ls, paper, strategies, stream
 
 INTERVALS = {"1": 1, "5": 5, "15": 15, "60": 60, "D": None}  # 화면의 봉 단위 → 분. D: 일봉(야후 NQ=F, 2021 ~)
 DAILY_FROM = "2021-01-01"
-FIRST = 1000     # 처음에 받는 봉 수
+FIRST = 1000     # 처음에 받는 봉 수. 화면을 왼쪽 끝까지 끌면 OLDER개씩 더 과거를 받는다
+OLDER = 1000
 RESYNC = 60.0    # 체결이 들어오는 동안: 웹소켓으로 만든 봉을 거래소 분봉과 맞추는 간격(초)
 FALLBACK = 3.0   # 체결이 끊겼을 때 분봉을 다시 받는 간격(초)
 QUOTE_EVERY = 10.0
 _bars = {}       # 분 → {봉 시작 시각: 봉}
 _at = {}
+_cont = {}       # 분 → 더 과거의 봉을 이어 받을 열쇠(None이면 LS에 더 없음)
 _quote = {"at": 0, "data": None}
 _lock = threading.Lock()
 _fetching = threading.Lock()  # LS 조회는 한 번에 하나만(동시에 온 요청이 같은 조회를 두 번 보내지 않게)
@@ -87,18 +89,38 @@ def bars(key, since=None):
     if stale():
         with _fetching:  # 체결 반영(_lock)은 막지 않는다
             if stale():  # 기다리는 사이에 다른 요청이 받아 왔으면 건너뛴다
-                rows = ls.minute_bars(_symbol(), minutes, FIRST if minutes not in _bars else 3)
+                first = minutes not in _bars
+                rows, cont = ls.minute_bars(_symbol(), minutes, FIRST if first else 3, more=True)
                 with _lock:
                     store = _bars.setdefault(minutes, {})
                     for r in rows:
                         store[r["t"]] = _bar(r)
                     _at[minutes] = time.time()
-                    if len(store) > FIRST * 2:
-                        for t in sorted(store)[:-FIRST]:
-                            del store[t]
+                    if first:
+                        _cont[minutes] = cont
     with _lock:
         store = _bars[minutes]
         return [store[t] for t in sorted(store) if since is None or t >= since]
+
+
+def older(key):
+    """화면을 왼쪽 끝까지 끌었을 때: 받아 둔 것보다 오래된 봉 OLDER개(오래된 것부터)와, LS에 더 남았는지."""
+    minutes = INTERVALS[key]
+    if key == "D" or minutes not in _bars:
+        return {"bars": [], "done": True}
+    with _fetching:
+        cont = _cont.get(minutes)
+        if not cont:
+            return {"bars": [], "done": True}
+        rows, cont = ls.minute_bars(_symbol(), minutes, OLDER, cont=cont, more=True)
+        with _lock:
+            store = _bars[minutes]
+            first = min(store)
+            new = [_bar(r) for r in rows if r["t"] < first]
+            for b in new:
+                store[b["time"]] = b
+            _cont[minutes] = cont
+    return {"bars": new, "done": cont is None or not new}
 
 
 def quote():
