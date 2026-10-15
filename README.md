@@ -23,7 +23,7 @@
    ```
 4. 연결 점검(읽기만 한다): `.venv\Scripts\python check.py`
 5. 서버: 바탕화면의 "MNQ Trader 서버" 바로가기(`start_server.bat`) 또는 `.venv\Scripts\python main.py` → http://127.0.0.1:8775
-   - 서버 창에 버전 · 컬러 바 · 경과 시간 · 레벨 · 분류를 줄 맞춰 찍는다(`mnq/console.py`, 미리 보기 `python -m mnq.console`). 화면이 몇 초마다 묻는 요청은 찍지 않는다
+   - 서버 창에 이름표(MNQ Server) · 컬러 바 · 경과 시간 · 레벨 · 분류를 줄 맞춰 찍는다(`mnq/console.py`, 미리 보기 `python -m mnq.console`). 화면이 몇 초마다 묻는 요청은 찍지 않는다
    - 작업 표시줄 알림 영역에 아이콘이 뜬다. 점이 초록이면 LS 시세를 받는 중, 노랑이면 끊김. 오른쪽 클릭으로 페이지 열기 · 서버 끄기
    - 한 번에 하나만 뜬다. 이미 켜져 있으면 브라우저만 열고 끝난다
    - 창을 닫으면 서버와 가상 계좌의 자동매매가 멈춘다

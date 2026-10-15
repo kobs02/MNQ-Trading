@@ -1,6 +1,6 @@
-"""서버 창(콘솔)의 로그 모양: 버전 · 왼쪽 컬러 바 · 경과 시간 · 레벨 · 분류 · 내용을 줄 맞춰 찍는다.
+"""서버 창(콘솔)의 로그 모양: 이름표 · 왼쪽 컬러 바 · 경과 시간 · 레벨 · 분류 · 내용을 줄 맞춰 찍는다.
 
-    v0.1.0 ▌ 00:00:01.234  SUCCESS  연결      Running on http://127.0.0.1:8775
+    MNQ Server ▌ 00:00:01.234  SUCCESS  연결      Running on http://127.0.0.1:8775
 
 - 로그 내용과 서버 동작은 그대로 두고 표준 logging에 서식만 붙인다. werkzeug(요청 기록)와 Flask 시작 문구도 같은 모양으로 맞춘다
 - 색은 ANSI 코드다. Windows 콘솔은 가상 터미널 처리를 켜서 보이게 하고, 켤 수 없거나 파일로 보낼 때는 색 없이 같은 모양으로 찍는다
@@ -16,7 +16,6 @@ import shutil
 import sys
 import unicodedata
 
-from . import config
 
 SUCCESS = 25  # INFO와 WARNING 사이: 서버가 뜨거나 연결이 된 것처럼 잘 끝난 일
 logging.addLevelName(SUCCESS, "SUCCESS")
@@ -126,7 +125,7 @@ def _classify(record):
 
 
 class ConsoleFormatter(logging.Formatter):
-    LABEL = f"v{config.VERSION}"
+    LABEL = "MNQ Server"
     HEAD = len(LABEL) + 1 + 2 + 12 + 2 + 7 + 2 + TAG_WIDTH + 2  # 버전 · 바 · 시간 · 레벨 · 분류가 차지하는 칸
 
     def __init__(self, color, wrap=False):
