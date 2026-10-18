@@ -79,7 +79,8 @@ def call(tr, body, cont_key=None, _retried=False, _busy=0):
         data = resp.json()
     except ValueError:
         raise LSError(f"{tr}: 응답을 읽지 못했습니다({resp.status_code}): {resp.text[:300]}")
-    if resp.status_code in (401, 403) and not _retried:  # 토큰이 만료됐거나 취소됐다
+    # 토큰이 만료됐거나 취소됐다. IGW00121(유효하지 않은 token)은 401/403이 아닌 코드로도 온다
+    if (resp.status_code in (401, 403) or data.get("rsp_cd") == "IGW00121") and not _retried:
         token(fresh=True)
         return call(tr, body, cont_key, _retried=True, _busy=_busy)
     # 초당 한도는 앱키마다 세므로 다른 프로그램(서버와 연구 스크립트)이 같은 TR을 부르면 넘을 수 있다. 1초 쉬고 다시 보낸다.
