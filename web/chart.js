@@ -9,6 +9,10 @@ const token = (name) => getComputedStyle(document.documentElement).getPropertyVa
 const fmtPrice = (v) => (v == null ? '-' : v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 const fmtMoney = (v, digits = 2) => (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: digits });
 const fmtSigned = (v, digits = 2) => (v == null ? '-' : (v >= 0 ? '+' : '') + (v * 100).toFixed(digits) + '%');
+const fmtLeft = (sec) => {  // 남은 시간: 3일 07:12:05
+  const s = Math.max(0, Math.round(sec - Date.now() / 1000)), d = Math.floor(s / 86400);
+  return (d ? `${d}일 ` : '') + [Math.floor(s / 3600) % 24, Math.floor(s / 60) % 60, s % 60].map((v) => String(v).padStart(2, '0')).join(':');
+};
 const fmtTime = (sec) => new Date(sec * 1000).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const tone = (v) => (v > 0 ? 'c-up' : v < 0 ? 'c-down' : '');
 const SLEEVES = { daily: '일봉', intraday: '장중' };
@@ -550,7 +554,10 @@ function renderWhy(c, d) {
   const next = c.scalp ? '평일 뉴욕 9:30 ~ 16시, 1분봉 마감마다' : c.hourly ? '매시 정각(1시간봉 마감마다, CME 쉬는 때 제외)' : `${c.next_intraday ? `장중 ${fmtTime(c.next_intraday)} · ` : ''}일봉 ${fmtTime(d.next_decision)}`;
   $('why').innerHTML = `<div class="why-head"><span class="pos-big">${position(c.contracts)}</span><span class="why-acct">`
     + (c.contracts && c.entry ? `진입 ${fmtPrice(c.entry)} · <b class="${tone(pnl)}">${fmtMoney(pnl)}</b><br>` : '')
-    + `가상 계좌 <b class="${tone(r)}">${fmtSigned(r)}</b></span></div>`
+    + `가상 계좌 <b class="${tone(r)}">${fmtSigned(r)}</b>`
+    + Object.entries(c.exit || {}).map(([k, t]) => `<br>${c.noise ? (k === 'daily' ? '일봉 ' : '장중 ') : ''}정리까지 <b data-until="${t}">${fmtLeft(t)}</b>`
+      + ` <small title="${k === 'daily' ? '새 5일 최저 종가가 나오면 5거래일 더 늘어난다. 휴장일은 따지지 않는다' : '장중 갈래는 뉴욕 16시에 정리'}">(${fmtTime(t)})</small>`).join('')
+    + `</span></div>`
     + body + `<p class="why-next">다음 판단 <b>${next}</b></p>` + (d.error ? `<div class="note warn">${d.error}</div>` : '')
     + '<p class="why-foot">일봉 조건의 값은 나스닥100 지수 기준이고, 차트의 선들은 MNQ 선물로 계산해 수준이 조금 다릅니다.</p>';
 }
@@ -609,11 +616,13 @@ $('trade-buttons').addEventListener('click', async (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   const flat = b.hasAttribute('data-flatten'), qty = Number(b.dataset.qty);
-  if (!confirm(flat ? '모든 포지션을 시장가로 정리하고 자동 주문을 멈출까요?'
+  const est = flat ? (account ? account.view : []).map(closeEstimate) : [];
+  if (!confirm(flat ? `${est.length ? est.map((x) => x.text).join('\n\n') + '\n\n' : '들고 있는 포지션이 없습니다.\n'}모든 포지션을 시장가로 정리하고 자동 주문을 멈출까요?`
     : `MNQ ${Math.abs(qty)}계약을 시장가로 ${qty > 0 ? '매수' : '매도'}할까요?\n자동 주문은 꺼집니다(아이콘 메뉴에서 다시 켜면 목표 계약 수로 되돌립니다).`)) return;
   b.disabled = true;
   try {
     await (flat ? post('/api/live/flatten', {}) : post('/api/live/order', { qty }));
+    if (flat && est.length) closed = est.map((x) => x.html).join('<br>');
   } catch (err) {
     alert('주문하지 못했습니다: ' + err.message);
   }
@@ -661,6 +670,7 @@ function renderAccount() {
     const pnl = q && q.symbol === p.symbol ? p.qty * mult * (price - p.entry) : p.pnl;
     return { ...p, price, pnl, roe: p.margin ? pnl / p.margin : null, of_capital: pnl / a.capital };
   });
+  a.view = pos;  // 정리 버튼이 실시간 가격으로 다시 계산한 손익을 쓰게
   renderRealEntry(pos.find((p) => q && p.symbol === q.symbol));
   const pnl = pos.reduce((s, p) => s + p.pnl, 0);
   const equity = a.deposit + pnl;
@@ -694,7 +704,22 @@ function renderRealEntry(p) {
   $('live-pos').innerHTML = p ? rows([
     ['실제 진입', `${position(p.qty)} @ <b>${fmtPrice(p.entry)}</b>`],
     ['수익률', `<b class="${tone(move)}">${fmtSigned(move)}</b> <small>(${fmtMoney(p.pnl)} · 계좌 ${fmtSigned(p.of_capital, 3)})</small>`],
-  ]) : rows([['실제 진입', '포지션 없음']]);
+  ]) : rows([['실제 진입', '포지션 없음']].concat(closed ? [['정리 결과', closed]] : []));
+}
+
+// 지금 정리하면 수수료 빼고 얼마인가. 대회는 체결 1계약당 매수·매도 각 $1을 수익률에서 빼고(진입 + 청산 = $2),
+// 증권사 수수료는 LS가 포지션에 적어 준 값(CsgnCmsn)만 넣는다. 시장가라 실제 체결가는 조금 다를 수 있다
+const CONTEST_FEE = 1;
+let closed = '';
+function closeEstimate(p) {
+  const fee = 2 * CONTEST_FEE * Math.abs(p.qty) + (p.fee || 0), net = p.pnl - fee, cap = account.capital;
+  const sign = (v) => (v >= 0 ? '+' : '') + fmtMoney(v);
+  return {
+    text: `${p.symbol} ${position(p.qty).replace(/<[^>]+>/g, '')}: 진입 ${fmtPrice(p.entry)} → 지금 ${fmtPrice(p.price)}\n`
+      + `가격 손익 ${sign(p.pnl)}\n수수료 -${fmtMoney(fee)} (대회 차감 $${2 * CONTEST_FEE}×${Math.abs(p.qty)}계약${p.fee ? ` + 증권사 ${fmtMoney(p.fee)}` : ''})\n`
+      + `수수료 뺀 손익 ${sign(net)} · 계좌 대비 ${fmtSigned(net / cap, 3)} · 증거금 대비 ${fmtSigned(p.margin ? net / p.margin : null)}`,
+    html: `<b class="${tone(net)}">${sign(net)}</b> <small>(수수료 ${fmtMoney(fee)} 뺌 · 계좌 ${fmtSigned(net / cap, 3)}, 누른 때 가격 기준 예상)</small>`,
+  };
 }
 
 async function tickAccount() {
@@ -769,6 +794,8 @@ renderTools();
 chooseInterval(state.interval);
 tickTrading();
 tickAccount();
+// 정리까지 남은 시간: 시세가 멈춰도(주말) 1초마다 흐르게 칸을 다시 그리지 않고 글자만 바꾼다
+setInterval(() => document.querySelectorAll('[data-until]').forEach((el) => { el.textContent = fmtLeft(Number(el.dataset.until)); }), 1000);
 setInterval(tickBars, 500);
 setInterval(tickTrading, 15000);
 setInterval(tickAccount, 5000);

@@ -270,7 +270,8 @@ def _backtests():
         _cache.update(backtests={key: strategies.backtest(key, px) for key in config.CANDIDATES}, at=time.time(),
                       signal={key: float(strategies.exposure(key, px).iloc[-1]) * c["lever"] for key, c in config.CANDIDATES.items()},
                       close=[px.index[-1].strftime("%Y-%m-%d"), float(px.iloc[-1])],
-                      explain={key: strategies.explain(key, px) for key in config.CANDIDATES})
+                      explain={key: strategies.explain(key, px) for key in config.CANDIDATES},
+                      left={key: strategies.days_left(key, px) for key in config.CANDIDATES})
     return _cache
 
 
@@ -318,9 +319,24 @@ def get_trading():
         out.append({"key": key, "name": cand["name"], "rule": cand["rule"], "scalp": "scalp" in cand, "hourly": bool(cand.get("ichimoku")), "equity": equity, "contracts": acct.get("contracts", 0), "entry": acct.get("entry"),
                     "parts": acct.get("parts"), "next_intraday": _next_intraday() if "intraday" in cand else None,
                     "started": acct.get("started"), "trades": acct.get("trades", [])[::-1][:50], "explain": bt["explain"][key], "noise": noise,
+                    "exit": _exits(cand, acct.get("parts") or {}, bt["close"][0], bt["left"][key]),
                     "signal": {"expo": bt["signal"][key], "contracts": _contracts(bt["signal"][key], equity, price) if price else None}})
     return {"candidates": out, "capital": config.CAPITAL, "multiplier": config.MULTIPLIER, "fee": config.FEE_PER_CONTRACT,
             "close": bt["close"], "next_decision": _next_decision(), "error": status["error"]}
+
+
+def _exits(cand, parts, close_day, left):
+    """갈래마다 포지션을 정리할 시각(초): 일봉은 마지막 종가일로부터 left거래일 뒤 뉴욕 16:10, 장중은 오늘 뉴욕 16시. 휴장일은 따지지 않는다."""
+    out = {}
+    if left and parts.get("daily", 1):  # parts가 없는 후보는 일봉 갈래뿐이다
+        at = datetime.strptime(close_day, "%Y-%m-%d").replace(hour=config.DECIDE_AFTER[0], minute=config.DECIDE_AFTER[1], tzinfo=NY)
+        while left:
+            at += timedelta(days=1)
+            left -= at.weekday() < 5
+        out["daily"] = int(at.timestamp())
+    if "intraday" in cand and parts.get("intraday"):
+        out["intraday"] = int(datetime.now(NY).replace(hour=16, minute=0, second=0, microsecond=0).timestamp())
+    return out
 
 
 def _next_intraday():

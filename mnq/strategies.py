@@ -63,6 +63,17 @@ def explain(key, px):
     return out
 
 
+def days_left(key, px):
+    """일봉 규칙으로 들고 있으면 마지막 종가로부터 몇 거래일 뒤 결정에서 정리하는가(새 신호로 연장되기 전 기준), 안 들고 있으면 None."""
+    rule = config.CANDIDATES[key]["rule"]
+    if rule == "flat" or not exposure(key, px).iloc[-1]:
+        return None
+    if rule == "ibs_trend":
+        return 1
+    ago = len(px.loc[px[px <= px.rolling(5).min()].index[-1]:]) - 1
+    return 5 - ago
+
+
 def exposure(key, px):
     """종가 표 px로 정한 날마다의 노출(배율 적용 전). 섞기 후보는 일봉 갈래의 것."""
     return RULES[config.CANDIDATES[key]["rule"]](px).fillna(0.0)

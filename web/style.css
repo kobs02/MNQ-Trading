@@ -943,7 +943,7 @@ dl.info dd small { color: var(--text-3); }
   flex: 1; max-width: 220px; padding: 7px 10px; border: 1px solid var(--border-strong); border-radius: 8px;
   background: var(--sunken); color: var(--text); font: inherit; font-size: 15px; font-weight: 700;
 }
-.pick-tabs { display: flex; width: fit-content; max-width: 100%; margin-bottom: 14px; }
+.pick-tabs { display: flex; flex-wrap: wrap; width: fit-content; max-width: 100%; margin-bottom: 14px; border-radius: 16px; }  /* 후보가 많아 한 줄에 안 들어가면 다음 줄로 */
 .why-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .why-head .pos-big { margin: 0; }
 .why-acct { color: var(--text-3); font-size: 13px; text-align: right; line-height: 1.6; }
