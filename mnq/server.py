@@ -64,6 +64,11 @@ def api_live():
     return jsonify(live.get_live())
 
 
+@app.get("/api/account")
+def api_account():
+    return jsonify(live.account())
+
+
 def _json():
     """주문 요청은 JSON만 받는다: 다른 사이트가 폼으로 몰래 보내는 요청(CSRF)은 브라우저가 JSON으로 보낼 수 없다."""
     if not request.is_json:

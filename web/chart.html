@@ -37,9 +37,30 @@
         <div id="legend" class="legend"></div>
         <div id="chart-msg" class="chart-msg" role="status">차트를 불러오는 중…</div>
       </section>
+      <!-- LS 모의계좌의 실제 자산과 포지션(바이낸스의 포지션 칸처럼) -->
+      <section id="account" class="account-panel" aria-labelledby="account-title">
+        <div class="account-head">
+          <h2 id="account-title">LS 모의계좌 <small id="account-note"></small></h2>
+          <dl id="account-sum" class="account-sum"></dl>
+        </div>
+        <div id="account-pos" class="account-pos"></div>
+      </section>
     </div>
     <div id="resizer" class="resizer" role="separator" aria-orientation="vertical" aria-label="차트와 매매 정보 크기 조절" tabindex="0" title="드래그하거나 좌우 화살표로 크기를 조절합니다 (더블클릭: 원래대로)"></div>
     <aside id="side" tabindex="-1">
+      <section class="card trade-card">
+        <h2>주문 <small id="live-note"></small></h2>
+        <div id="trade-buttons" class="trade-buttons">
+          <button class="buy" data-qty="1" disabled>매수 1계약</button>
+          <button class="sell" data-qty="-1" disabled>매도 1계약</button>
+          <button class="flat" data-flatten disabled>전부 정리하고 멈춤</button>
+        </div>
+        <div id="live"></div>
+      </section>
+      <section class="card">
+        <h2>추천 포지션과 근거 <small id="why-note"></small></h2>
+        <div id="why"></div>
+      </section>
       <section class="card">
         <h2>자동매매 후보 <small>차트에 이 후보의 매매를 표시합니다</small></h2>
         <div id="picks" class="pick-list" role="group" aria-label="후보"></div>
@@ -51,10 +72,6 @@
       <section class="card">
         <h2>다음 자동매매 <small>평일 뉴욕 16:10, 그날 종가로 결정</small></h2>
         <div id="next"></div>
-      </section>
-      <section class="card">
-        <h2>LS 모의계좌 자동 주문 <small id="live-note"></small></h2>
-        <div id="live"></div>
       </section>
       <section class="card">
         <h2>시세 <small id="quote-note"></small></h2>

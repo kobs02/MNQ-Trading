@@ -1,7 +1,8 @@
 // 실시간 차트 페이지: MNQ 근월물 봉을 0.5초마다 이어 그린다(서버가 LS 실시간 체결로 마지막 봉을 고친다).
 // 분봉에는 고른 후보를 최근 2년 1시간봉으로 돌린 롱·숏 진입·청산(과거 시험)과 가상 매매를, 일봉(2021 ~)에는 규칙의 진입·청산을 화살표로 표시한다.
 // 청산하거나 줄인 화살표에는 그 몫의 손익(비용 전)을 붙인다.
-// 오른쪽 칸에는 그 후보의 포지션, 다음 자동매매, 시세, 매매 기록을 보여 준다.
+// 규칙이 보는 값도 차트에 그린다: 일봉에는 200일선·5일 최저 종가, 분봉에는 장중 갈래의 9시 시가와 노이즈 경계.
+// 오른쪽 칸 맨 위는 주문 버튼과 추천 근거, 그 아래로 후보의 포지션, 다음 자동매매, 시세, 매매 기록. 차트 아래는 LS 모의계좌의 실제 포지션.
 
 const $ = (id) => document.getElementById(id);
 const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -60,6 +61,13 @@ const series = chart.addCandlestickSeries({
   priceFormat: { type: 'custom', minMove: 0.25, formatter: fmtPrice },
 });
 let entryLine = null;
+// 규칙이 보는 값(지표): 일봉의 선 두 개와 분봉의 가로선들
+const lineOpts = (color, title) => ({ color, title, lineWidth: 1, priceLineVisible: false, crosshairMarkerVisible: false, lastValueVisible: true,
+  priceFormat: { type: 'custom', minMove: 0.25, formatter: fmtPrice } });
+const smaSeries = chart.addLineSeries(lineOpts(token('--accent'), '200일선'));
+const lowSeries = chart.addLineSeries({ ...lineOpts(token('--text-3'), '5일 최저 종가'), lineStyle: LightweightCharts.LineStyle.Dotted,
+  lineType: LightweightCharts.LineType.WithSteps });
+let levelLines = [];
 
 // ---------- 봉 ----------
 const shifted = (b) => ({ ...b, time: b.time + TZ });
@@ -129,7 +137,39 @@ chart.subscribeCrosshairMove((p) => {
 });
 
 // ---------- 자동매매 표시 ----------
-const current = () => state.trading && (state.trading.candidates.find((c) => c.key === state.candidate) || state.trading.candidates[state.trading.candidates.length - 1]);
+const current = () => state.trading && (state.trading.candidates.find((c) => c.key === state.candidate)
+  || state.trading.candidates.find((c) => c.key === state.trading.live));  // 처음에는 자동 주문이 따라가는 후보
+
+// 뉴욕 시각의 '시'(0 ~ 23)
+const nyHour = () => Number(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' }));
+
+// 규칙이 보는 값을 차트에: 일봉은 차트의 봉(NQ 선물)으로 계산한 200일선·5일 최저 종가(규칙은 나스닥100 지수로 보므로 수준이 조금 다르다),
+// 분봉은 장중 갈래가 오늘 보는 9시 시가와 다음 판단 시각의 노이즈 경계(LS MNQ 1시간봉으로 계산한 그대로)
+let levelsKey = null;
+function renderLevels() {
+  const c = current();
+  // 0.5초마다 불리므로 후보·봉 단위·봉 개수·경계·시가 바뀔 때만 다시 그린다
+  const key = c && [state.interval, c.key, state.bars.length, JSON.stringify(c.noise), nyHour()].join('|');
+  if (key === levelsKey) return;
+  levelsKey = key;
+  const daily = state.interval === 'D' && c;
+  const closes = state.bars.map((b) => b.close);
+  const roll = (n, f) => state.bars.slice(n - 1).map((b, i) => ({ time: b.time + TZ, value: f(closes.slice(i, i + n)) }));
+  smaSeries.setData(daily && c.rule !== 'hold' && c.rule !== 'vt' ? roll(200, (w) => w.reduce((a, v) => a + v, 0) / w.length) : []);
+  lowSeries.setData(daily && c.rule === 'dip_trend' ? roll(5, (w) => Math.min(...w)) : []);
+  levelLines.forEach((l) => series.removePriceLine(l));
+  levelLines = [];
+  const n = c && state.interval !== 'D' ? c.noise : null;
+  if (!n || !n.today) return;
+  const hour = Math.min(15, Math.max(10, nyHour() + 1));
+  const band = n.bands[hour];
+  const line = (price, color, title) => levelLines.push(series.createPriceLine({ price, color, title, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true }));
+  line(n.open, token('--text-3'), '9시 시가');
+  if (band) {
+    line(band[0], UP, `${hour}시 판단: 위로 넘으면 롱`);
+    line(band[1], DOWN, `${hour}시 판단: 아래로 넘으면 숏`);
+  }
+}
 
 // 계약 수 변화 하나를 화살표 하나로: 새로 들면 "롱 진입 4", 다 정리하면 "롱 청산 +$120", 그 밖에는 늘리거나 줄인 계약 수
 function marker(time, from, to, long, pnl) {
@@ -209,12 +249,33 @@ function renderSide() {
     ['지금 신호', `${position(want || 0)} <small>(노출 ${c.signal.expo.toFixed(2)}배, ${d.close[0]} 종가 기준)</small>`],
     ['지금 결정하면', move == null ? '-' : move === 0 ? '그대로' : `<b class="${tone(move)}">${move > 0 ? '매수' : '매도'} ${Math.abs(move)}계약</b>`],
   ]) + (d.error ? `<div class="note warn">${d.error}</div>` : '');
+  renderWhy(c, d);
+  renderLevels();
 
   $('trades').innerHTML = c.trades.length ? `<table class="trend-table"><thead><tr><th>때</th><th>매매</th><th>가격</th></tr></thead><tbody>${c.trades.slice(0, 20).map((t) => {
     const move = t.to - t.from;
     return `<tr><td>${fmtTime(t.time)}${t.sleeve === 'intraday' ? ' <small>장중</small>' : ''}</td><td>${move ? `<b class="${tone(move)}">${move > 0 ? '매수' : '매도'} ${Math.abs(move)}</b> → ${position(t.to)}` : `그대로 ${position(t.to)}`}</td><td>${fmtPrice(t.price)}</td></tr>`;
   }).join('')}</tbody></table>` : `<p class="empty">아직 자동매매가 없습니다. 첫 결정은 ${fmtTime(d.next_decision)}입니다.</p>`;
   renderMarkers();
+}
+
+// 추천 포지션과 근거: 지금 신호(계약 수)와, 일봉 규칙이 마지막 종가에서 본 값, 장중 갈래의 마지막 판단과 오늘의 경계
+function renderWhy(c, d) {
+  $('why-note').textContent = `${c.name.split(' · ')[0]}${c.key === d.live ? ' · 자동 주문이 따라가는 후보' : ''}`;
+  const list = c.explain.map(([k, v]) => [k, v]);
+  if (c.noise) {
+    const last = c.trades.find((t) => t.sleeve === 'intraday');
+    const n = c.noise;
+    const hour = Math.min(15, Math.max(10, nyHour() + 1));
+    list.push(['장중 갈래', last ? `${fmtTime(last.time)} ${last.why}` : '아직 판단 없음']);
+    list.push([n.today ? '오늘 경계' : `${n.date.slice(5)} 경계`, n.bands[hour]
+      ? `9시 시가 ${fmtPrice(n.open)} → ${hour}시에 <span class="c-up">${fmtPrice(n.bands[hour][0])}</span> 위면 롱, <span class="c-down">${fmtPrice(n.bands[hour][1])}</span> 아래면 숏, 사이면 쉼`
+      : '-']);
+    if (c.parts) list.push(['합치기', `${partsText(c.parts)} → 더해서 최대 1계약`]);
+  }
+  $('why').innerHTML = `<div class="pos-big">${position(c.contracts)}</div>`
+    + `<p class="why-sub">일봉 신호 노출 ${c.signal.expo.toFixed(2)}배 · ${d.close[0]} 나스닥100 종가 기준</p>`
+    + rows(list) + '<p class="why-foot">일봉 규칙의 값은 나스닥100 지수 기준입니다. 차트의 200일선·5일 최저선은 차트의 MNQ 선물로 계산해 수준이 조금 다릅니다.</p>';
 }
 
 function renderQuote() {
@@ -237,6 +298,7 @@ function renderQuote() {
     ['만기', `${q.expiry.slice(0, 4)}-${q.expiry.slice(4, 6)}-${q.expiry.slice(6)}`],
   ]);
   renderSide();
+  renderAccount();
 }
 
 // ---------- 갱신 ----------
@@ -255,18 +317,19 @@ function renderLive(d) {
   const name = state.trading ? (state.trading.candidates.find((c) => c.key === d.candidate) || {}).name || d.candidate : d.candidate;
   $('live-note').textContent = d.enabled ? (d.started ? '켜짐' : `${fmtTime(d.start)} 대회 시작부터`) : '꺼짐(작업 표시줄 아이콘에서 켬)';
   const orders = d.orders.slice(0, 5).map((o) => `<tr><td>${fmtTime(o.time)}</td><td>${o.ok ? `<b class="${tone(o.qty)}">${o.manual ? '직접 ' : ''}${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}</b> (${o.from} → ${o.to})` : `<span class="c-down">실패</span> ${o.error || ''}`}</td></tr>`).join('');
-  const off = d.started ? '' : ' disabled title="대회 시작부터 누를 수 있습니다"';
+  $('trade-buttons').querySelectorAll('button').forEach((b) => {
+    b.disabled = !d.started;
+    b.title = d.started ? '' : '대회 시작부터 누를 수 있습니다';
+  });
   $('live').innerHTML = rows([
-    ['따라가는 후보', `<b>${name.split(' · ')[0]}</b>`],
+    ['자동 주문', `${d.enabled ? '<b class="c-up">켜짐</b>' : '<b>꺼짐</b> <small>(작업 표시줄 아이콘에서 켬)</small>'} · ${name.split(' · ')[0]} 따라감`],
     ['목표 / 실제', d.target == null ? '-' : `${position(d.target)} / ${position(d.actual)}`],
     ['상태', d.error ? `<span class="c-down">${d.error}</span>` : d.note || '-'],
-  ]) + (orders ? `<table class="trend-table"><tbody>${orders}</tbody></table>` : '<p class="empty">아직 주문이 없습니다.</p>')
-    + `<div class="card-actions live-actions"><button class="buy" data-qty="1"${off}>매수 1</button><button class="sell" data-qty="-1"${off}>매도 1</button>`
-    + `<button data-flatten${off}>전부 정리하고 멈춤</button></div>`;
+  ]) + (orders ? `<table class="trend-table"><tbody>${orders}</tbody></table>` : '<p class="empty">아직 주문이 없습니다.</p>');
 }
 
 // 직접 주문: 시장가로 바로 나가고 자동 주문은 꺼진다(켜 두면 30초 뒤 목표 계약 수로 되돌리기 때문)
-$('live').addEventListener('click', async (e) => {
+$('trade-buttons').addEventListener('click', async (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   const flat = b.hasAttribute('data-flatten'), qty = Number(b.dataset.qty);
@@ -279,7 +342,45 @@ $('live').addEventListener('click', async (e) => {
     alert('주문하지 못했습니다: ' + err.message);
   }
   api('/api/live').then(renderLive).catch(() => {});
+  tickAccount();
 });
+
+// 차트 아래 칸: LS 모의계좌의 실제 자산과 포지션. MNQ 손익은 실시간 시세로 다시 계산해 0.5초마다 움직이게 한다
+let account = null;
+function renderAccount() {
+  const a = account;
+  if (!a) return;
+  const q = state.quote;
+  const mult = state.trading ? state.trading.multiplier : 2;
+  const pos = a.positions.map((p) => {
+    const price = q && q.symbol === p.symbol ? q.price : p.price;
+    const pnl = q && q.symbol === p.symbol ? p.qty * mult * (price - p.entry) : p.pnl;
+    return { ...p, price, pnl, roe: p.margin ? pnl / p.margin : null, of_capital: pnl / a.capital };
+  });
+  const pnl = pos.reduce((s, p) => s + p.pnl, 0);
+  const equity = a.deposit + pnl;
+  $('account-note').textContent = `${fmtTime(a.at)} 조회`;
+  $('account-sum').innerHTML = [
+    ['평가 자산', `<b>${fmtMoney(equity)}</b>`],
+    ['대회 수익률', `<b class="${tone(equity - a.capital)}">${fmtSigned(equity / a.capital - 1)}</b>`],
+    ['미실현 손익', `<b class="${tone(pnl)}">${fmtMoney(pnl)}</b>`],
+    ['사용 증거금', fmtMoney(a.margin, 0)],
+  ].map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
+  $('account-pos').innerHTML = pos.length ? `<table class="trend-table account-table"><thead><tr><th>종목</th><th>포지션</th><th>진입가</th><th>현재가</th>
+    <th title="평가 자산이 증거금까지 줄어드는 가격(추정). LS의 실제 반대매매 기준과 다를 수 있습니다">청산가(추정)</th><th>미실현 손익 (증거금 대비)</th><th>계좌 대비</th><th>증거금</th></tr></thead><tbody>${pos.map((p) =>
+    `<tr><td><b>${p.symbol}</b></td><td>${position(p.qty)}</td><td>${fmtPrice(p.entry)}</td><td>${fmtPrice(p.price)}</td><td>${p.liq ? fmtPrice(p.liq) : '없음 <small>(계좌 충분)</small>'}</td>
+    <td><b class="${tone(p.pnl)}">${fmtMoney(p.pnl)}</b> <span class="${tone(p.pnl)}">(${fmtSigned(p.roe)})</span></td><td class="${tone(p.pnl)}">${fmtSigned(p.of_capital, 3)}</td><td>${fmtMoney(p.margin, 0)}</td></tr>`).join('')}</tbody></table>`
+    : '<p class="empty">들고 있는 포지션이 없습니다.</p>';
+}
+
+async function tickAccount() {
+  try {
+    account = await api('/api/account');
+    renderAccount();
+  } catch (e) {
+    $('account-note').textContent = '조회하지 못했습니다: ' + e.message;
+  }
+}
 
 async function tickTrading() {
   try {
@@ -338,5 +439,7 @@ $('picks').addEventListener('click', (ev) => {
 document.addEventListener('themechange', () => renderMarkers());
 chooseInterval(state.interval);
 tickTrading();
+tickAccount();
 setInterval(tickBars, 500);
 setInterval(tickTrading, 15000);
+setInterval(tickAccount, 5000);

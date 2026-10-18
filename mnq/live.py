@@ -207,6 +207,34 @@ def run():
     threading.Thread(target=loop, name="live", daemon=True).start()
 
 
+_account = {"at": 0, "data": None}
+
+
+def account():
+    """차트 아래 칸: LS 모의계좌의 USD 자산과 미결제 포지션(바이낸스의 포지션 칸처럼). 조회 한도 때문에 5초 동안은 같은 값을 준다."""
+    if _account["data"] and time.time() - _account["at"] < 5:
+        return _account["data"]
+    num = lambda d, k: float(d.get(k) or 0)
+    usd = next((r for r in ls.assets()[0] if r.get("CrcyCode") == "USD"), {})
+    _, rows = ls.positions()
+    deposit, pnl, margin = num(usd, "OvrsFutsDps"), num(usd, "AbrdFutsEvalPnlAmt"), num(usd, "AbrdFutsCsgnMgn")
+    equity = deposit + pnl
+    held = sum(int(r["BalQty"]) for r in rows) or 1
+    out = []
+    for r in rows:
+        n = (1 if r["BnsTpCode"] == "2" else -1) * int(r["BalQty"])
+        now, p = num(r, "OvrsDrvtNowPrc"), num(r, "AbrdFutsEvalPnlAmt")
+        im = margin * abs(n) / held  # 이 포지션 몫의 증거금
+        # 청산가(추정): 평가 자산이 증거금까지 줄어드는 가격. LS의 실제 반대매매 기준은 모른다
+        liq = now - (equity - margin) / (n * config.MULTIPLIER)
+        out.append({"symbol": r["IsuCodeVal"], "name": r.get("IsuNm"), "qty": n, "entry": num(r, "PchsPrc"), "price": now, "pnl": p,
+                    "roe": p / im if im else None, "of_capital": p / config.CAPITAL, "margin": im, "fee": num(r, "CsgnCmsn"),
+                    "liq": liq if liq > 0 else None})
+    _account.update(at=time.time(), data={"equity": equity, "deposit": deposit, "pnl": pnl, "margin": margin, "capital": config.CAPITAL,
+                                          "ret": equity / config.CAPITAL - 1, "positions": out, "at": int(time.time())})
+    return _account["data"]
+
+
 def get_live():
     """화면용: 연결 상태, 목표와 실제, 최근 주문."""
     with _lock:

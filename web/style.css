@@ -914,6 +914,26 @@ dl.info dt { color: var(--text-3); font-size: 14px; white-space: nowrap; }
 dl.info dd { margin: 0; text-align: right; }
 dl.info dd small { color: var(--text-3); }
 .pick-list .rail-item:hover, .pick-list .rail-item.active { background: var(--sunken); }
-.live-actions { margin-top: 10px; }
-.live-actions button.buy { border-color: var(--up-text); color: var(--up-text); }
-.live-actions button.sell { border-color: var(--down-text); color: var(--down-text); }
+/* 차트 페이지: 주문 버튼(오른쪽 맨 위), 추천 근거, 차트 아래 LS 모의계좌 칸 */
+.trade-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+.trade-buttons button {
+  padding: 12px 8px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--sunken);
+  color: var(--text); font: inherit; font-size: 16px; font-weight: 700; cursor: pointer;
+}
+.trade-buttons .buy { border-color: var(--long); background: color-mix(in srgb, var(--long) 18%, var(--panel)); color: var(--up-text); }
+.trade-buttons .sell { border-color: var(--short); background: color-mix(in srgb, var(--short) 18%, var(--panel)); color: var(--down-text); }
+.trade-buttons .flat { grid-column: 1 / -1; font-size: 15px; }
+.trade-buttons button:hover:not(:disabled) { filter: brightness(1.15); }
+.trade-buttons button:disabled { opacity: .45; cursor: not-allowed; }
+.why-sub, .why-foot { margin: -4px 0 12px; color: var(--text-3); font-size: 13px; }
+.why-foot { margin: 12px 0 0; }
+.account-panel { flex: none; max-height: 34vh; overflow: auto; padding: 12px 16px 14px; border-top: 1px solid var(--border); background: var(--panel); }
+.account-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 28px; margin-bottom: 10px; }
+.account-head h2 { margin: 0; font-size: 16px; font-weight: 700; }
+.account-head h2 small { margin-left: 6px; color: var(--text-3); font-size: 13px; font-weight: 400; }
+.account-sum { display: flex; flex-wrap: wrap; gap: 4px 24px; margin: 0; }
+.account-sum div { display: flex; gap: 8px; align-items: baseline; }
+.account-sum dt { color: var(--text-3); font-size: 13px; }
+.account-sum dd { margin: 0; }
+.account-table { width: 100%; }
+.account-table th, .account-table td { white-space: nowrap; }

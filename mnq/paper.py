@@ -105,11 +105,37 @@ def _intraday_side(ny, k):
     """장중 갈래의 이번 시각 방향(+1, -1, 0). LS 1시간봉으로 계산하고, 같은 시각에는 후보들이 나눠 쓴다. 계산할 수 없으면 None."""
     date, hour = pd.Timestamp(ny.date()), ny.hour
     if (date, hour, k) not in _side:
-        rows = ls.minute_bars(status["symbol"], 60, 500)  # 약 3주: 지난 14일 + 오늘
-        frame = pd.DataFrame({"open": [float(r["open"]) for r in rows], "close": [float(r["close"]) for r in rows]},
-                             index=pd.to_datetime([r["t"] for r in rows], unit="s", utc=True).tz_convert(NY).tz_localize(None))
-        _side[(date, hour, k)] = strategies.noise_side(strategies.moves(frame), date, hour, k)
+        _side[(date, hour, k)] = strategies.noise_side(strategies.moves(_hour_frame()), date, hour, k)
     return _side[(date, hour, k)]
+
+
+def _hour_frame():
+    """LS 1시간봉 약 3주(지난 14일 + 오늘): 뉴욕 시각(봉 시작) 색인, open·close."""
+    rows = ls.minute_bars(status["symbol"], 60, 500)
+    return pd.DataFrame({"open": [float(r["open"]) for r in rows], "close": [float(r["close"]) for r in rows]},
+                        index=pd.to_datetime([r["t"] for r in rows], unit="s", utc=True).tz_convert(NY).tz_localize(None))
+
+
+_bands = {}
+
+
+def bands(k):
+    """장중 갈래 설명용: 마지막 거래일(뉴욕)의 9시 시가와 판단 시각마다의 노이즈 경계 {시: [위, 아래]}. 한 시간에 한 번 LS로 계산."""
+    stamp = (datetime.now(NY).strftime("%Y-%m-%d %H"), k)
+    if _bands.get("stamp") != stamp and status["symbol"]:
+        _bands["stamp"] = stamp  # 실패해도 이 시간에는 다시 묻지 않는다(15초마다 LS를 부르지 않게)
+        frame = _hour_frame()
+        table = strategies.moves(frame)
+        date = table.index[-1]
+        o = float(frame.loc[frame.index == date + pd.Timedelta(hours=9), "open"].iloc[0])
+        out = {}
+        for hour in strategies.INTRADAY_HOURS:
+            past = table.loc[table.index < date, hour - 1].dropna().tail(strategies.NOISE_DAYS)
+            if len(past) == strategies.NOISE_DAYS:
+                n = k * float(past.abs().mean())
+                out[hour] = [o * (1 + n), o * (1 - n)]
+        _bands.update(stamp=stamp, data={"date": f"{date:%Y-%m-%d}", "today": date.date() == datetime.now(NY).date(), "open": o, "bands": out})
+    return _bands.get("data")
 
 
 def _intraday(key, acct, ny, price, now):
@@ -191,7 +217,8 @@ def _backtests():
         px = strategies.history()
         _cache.update(backtests={key: strategies.backtest(key, px) for key in config.CANDIDATES}, at=time.time(),
                       signal={key: float(strategies.exposure(key, px).iloc[-1]) * c["lever"] for key, c in config.CANDIDATES.items()},
-                      close=[px.index[-1].strftime("%Y-%m-%d"), float(px.iloc[-1])])
+                      close=[px.index[-1].strftime("%Y-%m-%d"), float(px.iloc[-1])],
+                      explain={key: strategies.explain(key, px) for key in config.CANDIDATES})
     return _cache
 
 
@@ -230,11 +257,17 @@ def get_trading():
     for key, cand in config.CANDIDATES.items():
         acct = states.get(key) or {}
         equity = acct.get("equity", config.CAPITAL)
-        out.append({"key": key, "name": cand["name"], "equity": equity, "contracts": acct.get("contracts", 0), "entry": acct.get("entry"),
+        noise = None
+        if "intraday" in cand:
+            try:
+                noise = bands(cand["intraday"]["k"])
+            except Exception as e:  # 설명용이라 실패해도 화면은 그대로
+                log.warning("장중 경계 계산 실패: %s", e)
+        out.append({"key": key, "name": cand["name"], "rule": cand["rule"], "equity": equity, "contracts": acct.get("contracts", 0), "entry": acct.get("entry"),
                     "parts": acct.get("parts"), "next_intraday": _next_intraday() if "intraday" in cand else None,
-                    "started": acct.get("started"), "trades": acct.get("trades", [])[::-1][:50],
+                    "started": acct.get("started"), "trades": acct.get("trades", [])[::-1][:50], "explain": bt["explain"][key], "noise": noise,
                     "signal": {"expo": bt["signal"][key], "contracts": _contracts(bt["signal"][key], equity, price) if price else None}})
-    return {"candidates": out, "capital": config.CAPITAL, "multiplier": config.MULTIPLIER, "fee": config.FEE_PER_CONTRACT,
+    return {"candidates": out, "capital": config.CAPITAL, "multiplier": config.MULTIPLIER, "fee": config.FEE_PER_CONTRACT, "live": config.LIVE["candidate"],
             "close": bt["close"], "next_decision": _next_decision(), "error": status["error"]}
 
 

@@ -38,6 +38,34 @@ RULES = {
 }
 
 
+def explain(key, px):
+    """화면의 '추천 근거': 그 후보의 일봉 규칙이 마지막 종가에서 본 값들 [(항목, 설명)]. 값은 나스닥100 지수(^NDX) 기준."""
+    rule, c = config.CANDIDATES[key]["rule"], float(px.iloc[-1])
+    sma = float(px.rolling(200).mean().iloc[-1])
+    vol = float(px.pct_change().rolling(20).std().iloc[-1] * np.sqrt(252))
+    trend = ("200일선", f"종가 {c:,.0f} / 200일선 {sma:,.0f} ({c / sma - 1:+.1%}) → " + ("위라 상승장(조건 충족)" if c > sma else "아래라 쉰다"))
+    if rule == "hold":
+        return [("규칙", "늘 롱(비교 기준)")]
+    if rule == "vt":
+        return [("20일 변동성", f"연 {vol:.0%} → 노출 15% ÷ {vol:.0%} = {min(0.15 / vol, 2):.2f}배")]
+    if rule == "trend_vt":
+        return [trend, ("20일 변동성", f"연 {vol:.0%} → 노출 {min(0.15 / vol, 2):.2f}배" + ("" if c > sma else "(200일선 아래라 0)"))]
+    if rule == "ibs_trend":
+        d = pd.read_pickle(config.STORE / "data" / "NDX_1d.pkl").reindex(px.index).iloc[-1]
+        v = (c - d["Low"]) / (d["High"] - d["Low"])
+        return [trend, ("IBS", f"(종가 - 저가) ÷ (고가 - 저가) = {v:.3f} → " + ("0.15 미만, 범위 바닥 마감이라 다음 하루 롱" if v < 0.15 else "0.15 이상이라 신호 없음"))]
+    # dip_trend: 5일 중 최저로 마감한 날부터 5일 동안 롱(그 사이 200일선 위일 때만)
+    hits = px[px <= px.rolling(5).min()]
+    last = hits.index[-1]
+    ago = len(px.loc[last:]) - 1  # 마지막 신호가 몇 거래일 전인가
+    again = float(px.iloc[-4:].min())
+    out = [trend, ("5일 최저 마감", f"{last:%m-%d} 종가 {hits.iloc[-1]:,.0f}" + (" (마지막 종가)" if ago == 0 else f" ({ago}거래일 전)"))]
+    if ago < 5:
+        out.append(("롱 기간", f"신호 뒤 5거래일. 새 최저가 없으면 {5 - ago}거래일 뒤 종가 결정에서 정리"))
+    out.append(("다시 신호", f"다음 종가가 {again:,.0f} 이하면 5일 최저 → 롱을 5일 연장"))
+    return out
+
+
 def exposure(key, px):
     """종가 표 px로 정한 날마다의 노출(배율 적용 전). 섞기 후보는 일봉 갈래의 것."""
     return RULES[config.CANDIDATES[key]["rule"]](px).fillna(0.0)
