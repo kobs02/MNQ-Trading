@@ -914,3 +914,6 @@ dl.info dt { color: var(--text-3); font-size: 14px; white-space: nowrap; }
 dl.info dd { margin: 0; text-align: right; }
 dl.info dd small { color: var(--text-3); }
 .pick-list .rail-item:hover, .pick-list .rail-item.active { background: var(--sunken); }
+.live-actions { margin-top: 10px; }
+.live-actions button.buy { border-color: var(--up-text); color: var(--up-text); }
+.live-actions button.sell { border-color: var(--down-text); color: var(--down-text); }

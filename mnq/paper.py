@@ -4,7 +4,8 @@
 - 섞기 후보는 장중 갈래도 있다: 평일 뉴욕 10 ~ 15시 정시에 LS 1시간봉으로 방향을 정하고 16시에 정리한다.
   계좌는 갈래마다의 계약 수(parts)를 따로 기억하고, 그 합을 든다. 차이만큼만 사고팔고 비용도 그만큼 뗀다
 - 1분마다 MNQ 가격으로 계좌를 다시 계산하고, 시간이 바뀔 때 기록을 남긴다
-- 계좌는 store/paper.json에 남아 프로그램을 껐다 켜도 이어진다. 꺼져 있던 동안의 결정은 되짚지 않는다
+- 계좌는 store/paper.json에 남아 프로그램을 껐다 켜도 이어진다. 꺼져 있던 동안의 매매는 되짚지 않고,
+  켜면 놓친 마지막 일봉 결정만 그 순간 가격으로 따라잡는다
 """
 import json
 import logging
@@ -163,11 +164,14 @@ def tick():
                     _intraday(key, acct, ny, price, now)
                 except Exception:
                     log.exception("장중 갈래 판단 실패(%s)", key)
-            if due and acct["decided"] != ny.strftime("%Y-%m-%d"):
+            if acct["decided"] != ny.strftime("%Y-%m-%d"):
                 if px is None:
                     px = strategies.history()
-                if px.index[-1].strftime("%Y-%m-%d") == ny.strftime("%Y-%m-%d"):  # 오늘 종가가 나왔을 때만(휴장일 제외)
+                    done = px[px.index < pd.Timestamp(ny.date())]  # 지난 거래일까지(야후 일봉의 오늘 장중 값 제외)
+                if due and px.index[-1].strftime("%Y-%m-%d") == ny.strftime("%Y-%m-%d"):  # 오늘 종가가 나왔을 때만(휴장일 제외)
                     _decide(key, acct, px, price, now)
+                elif (acct["decided"] or "") < done.index[-1].strftime("%Y-%m-%d"):  # 꺼져 있어 놓친 마지막 결정을 지금 가격으로 따라잡는다
+                    _decide(key, acct, done, price, now)
         _save()
 
 

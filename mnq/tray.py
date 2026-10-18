@@ -64,6 +64,7 @@ def start(url):
         pystray.MenuItem("실시간 차트 열기", lambda: webbrowser.open(url + "/chart.html"), default=True),  # 아이콘을 두 번 눌러도 열린다
         pystray.MenuItem("모의 운용 열기", lambda: webbrowser.open(url + "/paper.html")),
         pystray.MenuItem("LS 모의계좌 자동 주문", lambda: live.set_enabled(not live.enabled()), checked=lambda item: live.enabled()),
+        pystray.MenuItem("전부 정리하고 멈춤", live.flatten),
         pystray.MenuItem("서버 끄기", quit_server),
     ))
     icon.run_detached(setup=watch)

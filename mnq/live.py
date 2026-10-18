@@ -23,6 +23,7 @@ PATH = config.STORE / "live.json"
 CONFIRM = 90       # 주문을 낸 뒤 이만큼(초)은 새로 내지 않고 체결을 확인한다
 EVERY = 30
 _lock = threading.Lock()
+_busy = threading.Lock()  # 자동 주문(tick)과 화면의 직접 주문이 동시에 나가지 않게
 _state = None
 status = {"checked": None, "target": None, "actual": None, "error": None, "note": None}
 
@@ -60,9 +61,17 @@ def market_open(ny):
 
 def set_enabled(on):
     with _lock:
-        _load()["enabled"] = bool(on)
+        _load().update(enabled=bool(on), flatten=False)
         _save()
     log.warning("LS 모의계좌 자동 주문을 %s", "켰습니다" if on else "껐습니다(포지션은 그대로 둡니다)")
+
+
+def flatten():
+    """비상 정지: 목표를 0계약으로 바꿔 정리하고, 0이 확인되면 자동 주문을 끈다(장이 쉬는 동안에는 열릴 때까지 기다린다)."""
+    with _lock:
+        _load().update(enabled=True, flatten=True, flatten_at=int(time.time()))
+        _save()
+    log.warning("LS 모의계좌: 전부 정리하고 멈춤을 눌렀습니다. 0계약이 되면 자동 주문을 끕니다")
 
 
 def enabled():
@@ -76,7 +85,54 @@ def _target():
     return int(acct.get("contracts", 0))
 
 
+def _record(entry):
+    with _lock:
+        state = _load()
+        state["orders"].append(entry)
+        del state["orders"][:-1000]
+        _save()
+
+
+def manual(qty):
+    """화면의 매수(+)·매도(-) 버튼. 자동 주문을 먼저 끈다(켜 두면 30초 뒤 목표 계약 수로 되돌린다)."""
+    if type(qty) is not int or not qty:
+        raise ValueError("계약 수가 올바르지 않습니다")
+    symbol = paper.status["symbol"]
+    if not symbol:
+        raise ValueError("아직 종목을 모릅니다(시세 연결 전)")
+    if not started():
+        raise ValueError("대회 시작 전에는 주문하지 않습니다")
+    ny = datetime.now(NY)
+    if not market_open(ny):
+        raise ValueError("CME가 쉬는 시간입니다")
+    with _busy:
+        with _lock:
+            _load().update(enabled=False, flatten=False)
+            _save()
+        if any(int(o.get("UnercQty") or 0) > 0 for o in ls.orders(symbol)):
+            raise ValueError("미체결 주문이 있습니다")
+        actual = int(ls.positions()[0].get(symbol, 0))
+        if abs(actual + qty) > config.LIVE["max_contracts"]:
+            raise ValueError(f"주문 뒤 {actual + qty}계약이 최대({config.LIVE['max_contracts']}계약)를 넘습니다")
+        entry = {"time": int(time.time()), "day": ny.strftime("%Y-%m-%d"), "symbol": symbol, "qty": qty, "from": actual, "to": actual + qty,
+                 "price": paper.status["price"], "manual": True}
+        try:
+            entry.update(ok=True, number=ls.market_order(symbol, qty))
+            console.success(log, "LS 모의계좌 직접 주문: %s %d계약 (%d → %d) 주문번호 %s · 자동 주문은 껐습니다", "매수" if qty > 0 else "매도",
+                            abs(qty), actual, actual + qty, entry["number"])
+        except Exception as e:
+            entry.update(ok=False, error=str(e))
+            log.error("LS 모의계좌 직접 주문 실패: %s %d계약 · %s", "매수" if qty > 0 else "매도", abs(qty), e)
+        _record(entry)
+    return entry
+
+
 def tick():
+    with _busy:
+        _tick()
+
+
+def _tick():
     now = time.time()
     ny = datetime.now(NY)
     symbol = paper.status["symbol"]
@@ -93,6 +149,12 @@ def tick():
         sent_today = sum(1 for o in state["orders"] if o.get("day") == today and o.get("ok"))
         last = state["orders"][-1] if state["orders"] else None
         why = None
+        if state.get("flatten"):
+            target = status["target"] = 0
+            if actual == 0:
+                state.update(enabled=False, flatten=False)
+                _save()
+                console.success(log, "LS 모의계좌: 전부 정리했고 자동 주문을 껐습니다")
         if not state["enabled"]:
             why = "자동 주문이 꺼져 있습니다"
         elif not started(now):
@@ -125,11 +187,7 @@ def tick():
     except Exception as e:
         entry.update(ok=False, error=str(e))
         log.error("LS 모의계좌 주문 실패: %s %d계약 · %s", "매수" if qty > 0 else "매도", abs(qty), e)
-    with _lock:
-        state = _load()
-        state["orders"].append(entry)
-        del state["orders"][:-1000]
-        _save()
+    _record(entry)
 
 
 def run():
@@ -194,4 +252,25 @@ if __name__ == "__main__":
     _state["enabled"] = False
     tick()
     assert sent == [2, -3] and "꺼져" in status["note"]
+    paper._load = lambda: {config.LIVE["candidate"]: {"contracts": 1}}
+    book["pos"] = -1
+    flatten()
+    tick()
+    assert sent == [2, -3, 1], sent              # 목표와 상관없이 숏 1 → 0: 매수 1
+    _state["orders"][-1]["time"] -= CONFIRM + 1
+    book["pos"] = 0
+    tick()
+    assert sent == [2, -3, 1] and not _state["enabled"] and not _state["flatten"]  # 0이 되면 끈다
+    _state["enabled"] = True
+    started = lambda now=None: True
+    manual(-2)
+    assert sent == [2, -3, 1, -2] and not _state["enabled"] and _state["orders"][-1]["manual"]  # 직접 주문은 자동 주문을 끈다
+    book["pos"] = -2
+    for bad in (-3, 0, 1.5, True):  # 최대 초과(-5), 0, 소수, 참거짓은 거절
+        try:
+            manual(bad)
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+    assert sent == [2, -3, 1, -2]
     print("live 점검 통과")

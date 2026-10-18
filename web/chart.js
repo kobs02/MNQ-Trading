@@ -39,6 +39,13 @@ async function api(path) {
   return body;
 }
 
+async function post(path, data) {
+  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body;
+}
+
 const chart = LightweightCharts.createChart($('chart'), {
   autoSize: true,
   layout: { background: { color: 'transparent' }, textColor: token('--text-2'), fontFamily: 'inherit', fontSize: 13 },
@@ -247,13 +254,32 @@ async function tickBars() {
 function renderLive(d) {
   const name = state.trading ? (state.trading.candidates.find((c) => c.key === d.candidate) || {}).name || d.candidate : d.candidate;
   $('live-note').textContent = d.enabled ? (d.started ? '켜짐' : `${fmtTime(d.start)} 대회 시작부터`) : '꺼짐(작업 표시줄 아이콘에서 켬)';
-  const orders = d.orders.slice(0, 5).map((o) => `<tr><td>${fmtTime(o.time)}</td><td>${o.ok ? `<b class="${tone(o.qty)}">${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}</b> (${o.from} → ${o.to})` : `<span class="c-down">실패</span> ${o.error || ''}`}</td></tr>`).join('');
+  const orders = d.orders.slice(0, 5).map((o) => `<tr><td>${fmtTime(o.time)}</td><td>${o.ok ? `<b class="${tone(o.qty)}">${o.manual ? '직접 ' : ''}${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}</b> (${o.from} → ${o.to})` : `<span class="c-down">실패</span> ${o.error || ''}`}</td></tr>`).join('');
+  const off = d.started ? '' : ' disabled title="대회 시작부터 누를 수 있습니다"';
   $('live').innerHTML = rows([
     ['따라가는 후보', `<b>${name.split(' · ')[0]}</b>`],
     ['목표 / 실제', d.target == null ? '-' : `${position(d.target)} / ${position(d.actual)}`],
     ['상태', d.error ? `<span class="c-down">${d.error}</span>` : d.note || '-'],
-  ]) + (orders ? `<table class="trend-table"><tbody>${orders}</tbody></table>` : '<p class="empty">아직 주문이 없습니다.</p>');
+  ]) + (orders ? `<table class="trend-table"><tbody>${orders}</tbody></table>` : '<p class="empty">아직 주문이 없습니다.</p>')
+    + `<div class="card-actions live-actions"><button class="buy" data-qty="1"${off}>매수 1</button><button class="sell" data-qty="-1"${off}>매도 1</button>`
+    + `<button data-flatten${off}>전부 정리하고 멈춤</button></div>`;
 }
+
+// 직접 주문: 시장가로 바로 나가고 자동 주문은 꺼진다(켜 두면 30초 뒤 목표 계약 수로 되돌리기 때문)
+$('live').addEventListener('click', async (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  const flat = b.hasAttribute('data-flatten'), qty = Number(b.dataset.qty);
+  if (!confirm(flat ? '모든 포지션을 시장가로 정리하고 자동 주문을 멈출까요?'
+    : `MNQ ${Math.abs(qty)}계약을 시장가로 ${qty > 0 ? '매수' : '매도'}할까요?\n자동 주문은 꺼집니다(아이콘 메뉴에서 다시 켜면 목표 계약 수로 되돌립니다).`)) return;
+  b.disabled = true;
+  try {
+    await (flat ? post('/api/live/flatten', {}) : post('/api/live/order', { qty }));
+  } catch (err) {
+    alert('주문하지 못했습니다: ' + err.message);
+  }
+  api('/api/live').then(renderLive).catch(() => {});
+});
 
 async function tickTrading() {
   try {
