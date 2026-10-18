@@ -81,6 +81,21 @@ def api_live_order():
     return jsonify(live.manual(_json().get("qty")))
 
 
+@app.post("/api/live/enabled")
+def api_live_enabled():
+    on = _json().get("on")
+    if type(on) is not bool:
+        raise ValueError("on은 true 또는 false여야 합니다")
+    live.set_enabled(on)
+    return jsonify(live.get_live())
+
+
+@app.post("/api/live/candidate")
+def api_live_candidate():
+    live.set_candidate(_json().get("key"))
+    return jsonify(live.get_live())
+
+
 @app.post("/api/live/flatten")
 def api_live_flatten():
     _json()
@@ -90,7 +105,7 @@ def api_live_flatten():
 
 @app.get("/api/trading")
 def api_trading():
-    return jsonify(paper.get_trading())
+    return jsonify({**paper.get_trading(), "live": live.candidate()})
 
 
 if __name__ == "__main__":

@@ -162,6 +162,31 @@ def _intraday(key, acct, ny, price, now):
         _set(key, acct, "intraday", n, price, now, {"date": f"{ny:%Y-%m-%d}", "expo": side * cand["lever"], "why": f"{ny.hour}시 판단: {why}"})
 
 
+def _minute_frame():
+    """LS 1분봉 500개(약 8시간, 마감된 봉만): 뉴욕 시각(봉 시작) 색인, open·high·low·close."""
+    rows = [r for r in ls.minute_bars(status["symbol"], 1, 500) if r["t"] + 60 <= time.time()]
+    return pd.DataFrame({k: [float(r[k]) for r in rows] for k in ("open", "high", "low", "close")},
+                        index=pd.to_datetime([r["t"] for r in rows], unit="s", utc=True).tz_convert(NY).tz_localize(None))
+
+
+def _scalp(key, acct, ny, price, now):
+    """스캘핑 갈래(관찰용): 오늘 뉴욕 9:30부터의 LS 1분봉에 과거 시험과 같은 scalp_trades를 돌려, 지금 들고 있어야 할 방향을 따른다.
+    가상 체결은 그 순간의 가격이라 익절·손절 가격과 조금 다르다."""
+    cfg = config.CANDIDATES[key]["scalp"]
+    held = acct.get("parts", {}).get("scalp", 0)
+    if ny.weekday() >= 5 or not (9 * 60 + 30 <= ny.hour * 60 + ny.minute < 17 * 60):
+        if held:
+            _set(key, acct, "scalp", 0, price, now, {"date": f"{ny:%Y-%m-%d}", "expo": 0.0, "why": "장 마감 정리"})
+        return
+    trades = strategies.scalp_trades(_minute_frame(), **cfg, since=pd.Timestamp(ny.date()) + pd.Timedelta(hours=9, minutes=30))
+    last = trades[-1] if trades else None
+    want = last["side"] if last and last["t_out"] is None else 0
+    if want != held:
+        why = (f"{cfg['look']}분 {'고가' if want > 0 else '저가'} 돌파 → {'롱' if want > 0 else '숏'} (진입 {last['entry']:,.2f})" if want
+               else f"{last['why']} ({last['exit']:,.2f})" if last and last["t_out"] is not None else "정리")
+        _set(key, acct, "scalp", want, price, now, {"date": f"{ny:%Y-%m-%d}", "expo": float(want), "why": why})
+
+
 def tick():
     """감시 스레드가 1분마다 부른다."""
     now = time.time()
@@ -190,6 +215,11 @@ def tick():
                     _intraday(key, acct, ny, price, now)
                 except Exception:
                     log.exception("장중 갈래 판단 실패(%s)", key)
+            if "scalp" in config.CANDIDATES[key]:
+                try:
+                    _scalp(key, acct, ny, price, now)
+                except Exception:
+                    log.exception("스캘핑 판단 실패(%s)", key)
             if acct["decided"] != ny.strftime("%Y-%m-%d"):
                 if px is None:
                     px = strategies.history()
@@ -263,11 +293,11 @@ def get_trading():
                 noise = bands(cand["intraday"]["k"])
             except Exception as e:  # 설명용이라 실패해도 화면은 그대로
                 log.warning("장중 경계 계산 실패: %s", e)
-        out.append({"key": key, "name": cand["name"], "rule": cand["rule"], "equity": equity, "contracts": acct.get("contracts", 0), "entry": acct.get("entry"),
+        out.append({"key": key, "name": cand["name"], "rule": cand["rule"], "scalp": "scalp" in cand, "equity": equity, "contracts": acct.get("contracts", 0), "entry": acct.get("entry"),
                     "parts": acct.get("parts"), "next_intraday": _next_intraday() if "intraday" in cand else None,
                     "started": acct.get("started"), "trades": acct.get("trades", [])[::-1][:50], "explain": bt["explain"][key], "noise": noise,
                     "signal": {"expo": bt["signal"][key], "contracts": _contracts(bt["signal"][key], equity, price) if price else None}})
-    return {"candidates": out, "capital": config.CAPITAL, "multiplier": config.MULTIPLIER, "fee": config.FEE_PER_CONTRACT, "live": config.LIVE["candidate"],
+    return {"candidates": out, "capital": config.CAPITAL, "multiplier": config.MULTIPLIER, "fee": config.FEE_PER_CONTRACT,
             "close": bt["close"], "next_decision": _next_decision(), "error": status["error"]}
 
 

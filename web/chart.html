@@ -48,8 +48,11 @@
     </div>
     <div id="resizer" class="resizer" role="separator" aria-orientation="vertical" aria-label="차트와 매매 정보 크기 조절" tabindex="0" title="드래그하거나 좌우 화살표로 크기를 조절합니다 (더블클릭: 원래대로)"></div>
     <aside id="side" tabindex="-1">
+      <!-- 주문: 대회에 쓸 매매법, 자동 주문 켜고 끄기, 직접 주문 -->
       <section class="card trade-card">
-        <h2>주문 <small id="live-note"></small></h2>
+        <h2>주문 <small id="live-note"></small>
+          <span class="card-actions"><button id="auto-toggle" class="auto-toggle" aria-pressed="false">자동 주문 꺼짐</button></span></h2>
+        <label class="live-pick">대회 매매법 <select id="live-pick" aria-label="대회 매매법"></select></label>
         <div id="trade-buttons" class="trade-buttons">
           <button class="buy" data-qty="1" disabled>매수 1계약</button>
           <button class="sell" data-qty="-1" disabled>매도 1계약</button>
@@ -57,31 +60,12 @@
         </div>
         <div id="live"></div>
       </section>
+      <!-- 매매법: 차트에 표시할 후보, 그 후보의 지금 포지션과 근거 -->
       <section class="card">
-        <h2>추천 포지션과 근거 <small id="why-note"></small></h2>
+        <h2>매매법 <small id="why-note"></small></h2>
+        <nav id="picks" class="pill-group pick-tabs" aria-label="차트에 표시할 매매법"></nav>
         <div id="why"></div>
       </section>
-      <section class="card">
-        <h2>자동매매 후보 <small>차트에 이 후보의 매매를 표시합니다</small></h2>
-        <div id="picks" class="pick-list" role="group" aria-label="후보"></div>
-      </section>
-      <section class="card">
-        <h2>지금 포지션 <small id="pos-note"></small></h2>
-        <div id="position"></div>
-      </section>
-      <section class="card">
-        <h2>다음 자동매매 <small>평일 뉴욕 16:10, 그날 종가로 결정</small></h2>
-        <div id="next"></div>
-      </section>
-      <section class="card">
-        <h2>시세 <small id="quote-note"></small></h2>
-        <div id="quote"></div>
-      </section>
-      <section class="card">
-        <h2>매매 기록 <small>최근 순</small></h2>
-        <div id="trades" class="journal"></div>
-      </section>
-      <p class="disclaimer">후보들은 실제 주문을 내지 않는 가상의 계좌입니다. LS 모의계좌 자동 주문은 대회 시작(10-19 08:00)부터 고른 후보 하나를 따라 주문합니다. 시세는 LS증권 해외선물 OPEN API입니다.</p>
     </aside>
   </main>
 

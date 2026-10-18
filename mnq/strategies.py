@@ -14,11 +14,6 @@ COST = 0.0001
 WIN, STEP = 20, 5  # 대회와 같은 4주(거래일 20일) 구간, 5거래일 간격
 
 
-def _vt(px):
-    vol = px.pct_change().rolling(20).std() * np.sqrt(252)
-    return (0.15 / vol).clip(upper=2.0)  # 연 변동성 15%에 맞춘 노출, 최대 2배
-
-
 def _dip(px):
     return (px <= px.rolling(5).min()).astype(float).rolling(5).max()  # 5일 중 최저로 마감하면 5일 동안 롱
 
@@ -30,9 +25,7 @@ def _ibs(px, x=0.15):
 
 
 RULES = {
-    "hold": lambda px: pd.Series(1.0, index=px.index),
-    "vt": _vt,
-    "trend_vt": lambda px: (px > px.rolling(200).mean()) * _vt(px),
+    "flat": lambda px: pd.Series(0.0, index=px.index),  # 일봉 갈래가 없는 후보(스캘핑)
     "dip_trend": lambda px: _dip(px) * (px > px.rolling(200).mean()),
     "ibs_trend": lambda px: _ibs(px) * (px > px.rolling(200).mean()),
 }
@@ -42,14 +35,12 @@ def explain(key, px):
     """화면의 '추천 근거': 그 후보의 일봉 규칙이 마지막 종가에서 본 값들 [(항목, 설명)]. 값은 나스닥100 지수(^NDX) 기준."""
     rule, c = config.CANDIDATES[key]["rule"], float(px.iloc[-1])
     sma = float(px.rolling(200).mean().iloc[-1])
-    vol = float(px.pct_change().rolling(20).std().iloc[-1] * np.sqrt(252))
     trend = ("200일선", f"종가 {c:,.0f} / 200일선 {sma:,.0f} ({c / sma - 1:+.1%}) → " + ("위라 상승장(조건 충족)" if c > sma else "아래라 쉰다"))
-    if rule == "hold":
-        return [("규칙", "늘 롱(비교 기준)")]
-    if rule == "vt":
-        return [("20일 변동성", f"연 {vol:.0%} → 노출 15% ÷ {vol:.0%} = {min(0.15 / vol, 2):.2f}배")]
-    if rule == "trend_vt":
-        return [trend, ("20일 변동성", f"연 {vol:.0%} → 노출 {min(0.15 / vol, 2):.2f}배" + ("" if c > sma else "(200일선 아래라 0)"))]
+    if rule == "flat":
+        sc = config.CANDIDATES[key]["scalp"]
+        return [("규칙", f"뉴욕 9:30 ~ 16시, 1분봉 종가가 직전 {sc['look']}분 고가 위면 롱 · 저가 아래면 숏. 다음 봉 시가에 들고 "
+                       f"익절 {sc['tp']:g}포인트, 손절 {sc['sl']:g}포인트, 최대 {sc['hold']}분"),
+                ("연구 결과", "r5: 비용 뒤 승률 93%였지만 1회 평균 -1.4포인트(앞쪽), 뒤쪽 -2.7포인트. 자주 조금 벌고 가끔 크게 잃는다 → 관찰용")]
     if rule == "ibs_trend":
         d = pd.read_pickle(config.STORE / "data" / "NDX_1d.pkl").reindex(px.index).iloc[-1]
         v = (c - d["Low"]) / (d["High"] - d["Low"])
@@ -237,6 +228,8 @@ def replay(key, px):
     일봉 갈래는 그날 뉴욕 16:10에, 장중 갈래는 10 ~ 15시 정시에 정하고 16시에 정리한다(mnq/paper.py와 같은 순서·같은 상한).
     계좌는 늘 시작 금액으로 보고, 가격은 그 시각 직전 1시간봉의 종가다."""
     cand = config.CANDIDATES[key]
+    if "scalp" in cand:
+        return _scalp_events(key)
     h = hourly()
     at = h["close"].copy()
     at.index = at.index + pd.Timedelta(hours=1)  # 그 정시의 가격 = 직전 봉 종가
@@ -270,12 +263,82 @@ def replay(key, px):
     return _with_pnl(out)
 
 
+# ---------- 스캘핑(관찰용): research/r5_scalp.py에서 승률이 가장 높던 설정 ----------
+# 1분봉 종가가 직전 look분 고가 위면 롱, 저가 아래면 숏(뉴욕 9:30 ~ 16시에 시작한 봉만). 다음 봉 시가에 들고 익절 tp·손절 sl(포인트)·최대 hold분.
+# 같은 봉에서 익절·손절이 함께 닿으면 손절로 본다(r5와 같은 보수적 가정). r5는 신호마다 겹쳐 셌지만 여기서는 한 번에 하나만 든다.
+def scalp_trades(frame, look=30, tp=2.0, sl=25.0, hold=60, since=None):
+    """frame: 1분봉(뉴욕 시각, 봉 시작 색인, open·high·low·close, 마감된 봉만). since 뒤에 신호가 난 매매들
+    [{side, t_in, entry, t_out, exit, why}]. 아직 끝나지 않은 매매는 t_out이 None이다."""
+    o, h, l, c = (frame[k].to_numpy() for k in ("open", "high", "low", "close"))
+    top = frame["high"].shift(1).rolling(look).max().to_numpy()
+    bottom = frame["low"].shift(1).rolling(look).min().to_numpy()
+    t = frame.index
+    minute = t.hour * 60 + t.minute
+    ok = (minute >= 9 * 60 + 30) & (minute < 16 * 60) & (t.dayofweek < 5)
+    if since is not None:
+        ok &= t >= since
+    out, i, n = [], look, len(frame)
+    while i < n - 1:
+        side = 1 if c[i] > top[i] else -1 if c[i] < bottom[i] else 0
+        if not (ok[i] and side):
+            i += 1
+            continue
+        trade = {"side": side, "t_in": t[i + 1], "entry": float(o[i + 1]), "t_out": None, "exit": None, "why": None}
+        out.append(trade)
+        end = t[i + 1] + pd.Timedelta(minutes=hold)
+        j = i + 1
+        while j < n and t[j] < end:
+            gain, loss = (h[j] - o[i + 1], o[i + 1] - l[j]) if side > 0 else (o[i + 1] - l[j], h[j] - o[i + 1])
+            if loss >= sl or gain >= tp:
+                hit = loss >= sl  # 둘 다 닿으면 손절
+                trade.update(t_out=t[j] + pd.Timedelta(minutes=1), exit=trade["entry"] + side * (-sl if hit else tp), why="손절" if hit else "익절")
+                break
+            j += 1
+        else:
+            if j == n:
+                return out  # 아직 들고 있다
+            trade.update(t_out=t[j], exit=float(c[j - 1]), why=f"{hold}분 청산")
+        i = j
+    return out
+
+
+def minute_history():
+    """스캘핑 과거 시험용 LS MNQ 1분봉(research/fetch_1m.py로 받은 것, 뉴욕 시각). 근월물이 되기 전 거래가 적던 날은 뺀다(r5와 같게)."""
+    import glob
+    df = pd.read_pickle(sorted(glob.glob(str(config.STORE / "data" / "ls_*_1m.pkl")))[-1])
+    vol = df["volume"].groupby(df.index.normalize()).sum()
+    df = df[df.index.normalize().isin(vol[vol > vol.max() * 0.2].index)]
+    df.index = df.index.tz_localize(None)
+    return df
+
+
+def _scalp_events(key):
+    """스캘핑 과거 시험의 계약 수 변화(1계약, 차트 화살표용)."""
+    out = []
+    for x in scalp_trades(minute_history(), **config.CANDIDATES[key]["scalp"]):
+        side = "롱" if x["side"] > 0 else "숏"
+        out.append({"time": int(x["t_in"].tz_localize("America/New_York").timestamp()), "from": 0, "to": x["side"], "price": x["entry"],
+                    "sleeve": "scalp", "why": f"돌파 → {side}"})
+        if x["t_out"] is not None:
+            out.append({"time": int(x["t_out"].tz_localize("America/New_York").timestamp()), "from": x["side"], "to": 0, "price": x["exit"],
+                        "sleeve": "scalp", "why": x["why"]})
+    return _with_pnl(out)
+
+
 def backtest(key, px):
     """과거 시험: 그래프용 곡선(배율 적용), 구간별·연도별 성적, 4주 구간 분포.
 
     일봉 후보는 나스닥100 지수 일봉(2000 ~), 섞기 후보는 장중 갈래 때문에 NQ=F 1시간봉(최근 2년)으로 한다. 마지막 구간이 확인용이다."""
     cand = config.CANDIDATES[key]
-    if "intraday" in cand:
+    if "scalp" in cand:
+        closed = [x for x in scalp_trades(minute_history(), **cand["scalp"]) if x["t_out"] is not None]
+        pts = pd.Series([(x["exit"] - x["entry"]) * x["side"] for x in closed], index=[x["t_out"] for x in closed])
+        cash = (pts * config.MULTIPLIER - 2 * config.FEE_PER_CONTRACT) / config.CAPITAL  # 1계약, 가상 계좌와 같은 비용(사고팔 때마다)
+        pnl = cash.groupby(cash.index.normalize()).sum()
+        periods = {f"1분봉 {pnl.index[0]:%Y-%m-%d} ~": (None, None)}
+        note = (f"LS MNQ 1분봉 {len(pnl)}일, 매매 {len(pts)}번: 승률(비용 전) {(pts > 0).mean():.0%}, 1회 평균 {pts.mean():+.2f}포인트(비용 전). "
+                "기간이 아주 짧아 근거가 약하다")
+    elif "intraday" in cand:
         hp = mix_pnl(key, px)
         pnl = hp.groupby(hp.index.normalize()).sum()
         pnl = pnl[pnl.index.dayofweek < 5]

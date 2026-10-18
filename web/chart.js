@@ -2,7 +2,7 @@
 // 분봉에는 고른 후보를 최근 2년 1시간봉으로 돌린 롱·숏 진입·청산(과거 시험)과 가상 매매를, 일봉(2021 ~)에는 규칙의 진입·청산을 화살표로 표시한다.
 // 청산하거나 줄인 화살표에는 그 몫의 손익(비용 전)을 붙인다.
 // 규칙이 보는 값도 차트에 그린다: 일봉에는 200일선·5일 최저 종가, 분봉에는 장중 갈래의 9시 시가와 노이즈 경계.
-// 오른쪽 칸 맨 위는 주문 버튼과 추천 근거, 그 아래로 후보의 포지션, 다음 자동매매, 시세, 매매 기록. 차트 아래는 LS 모의계좌의 실제 포지션.
+// 오른쪽 칸은 두 개: 주문(대회 매매법 고르기, 자동 주문 켜고 끄기, 직접 주문)과 매매법(차트에 표시할 후보의 포지션과 근거). 차트 아래는 LS 모의계좌의 실제 포지션.
 
 const $ = (id) => document.getElementById(id);
 const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -155,7 +155,7 @@ function renderLevels() {
   const daily = state.interval === 'D' && c;
   const closes = state.bars.map((b) => b.close);
   const roll = (n, f) => state.bars.slice(n - 1).map((b, i) => ({ time: b.time + TZ, value: f(closes.slice(i, i + n)) }));
-  smaSeries.setData(daily && c.rule !== 'hold' && c.rule !== 'vt' ? roll(200, (w) => w.reduce((a, v) => a + v, 0) / w.length) : []);
+  smaSeries.setData(daily && c.rule !== 'flat' ? roll(200, (w) => w.reduce((a, v) => a + v, 0) / w.length) : []);
   lowSeries.setData(daily && c.rule === 'dip_trend' ? roll(5, (w) => Math.min(...w)) : []);
   levelLines.forEach((l) => series.removePriceLine(l));
   levelLines = [];
@@ -215,53 +215,27 @@ function rows(list) {
   return `<dl class="info">${list.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl>`;
 }
 
+// 매매법 칸: 차트에 표시할 후보 탭(★ = 대회 매매법), 그 후보의 가상 포지션과 근거, 다음 판단 시각
 function renderSide() {
   const d = state.trading;
   if (!d) return;
   const c = current();
   state.candidate = c.key;
   $('picks').innerHTML = d.candidates.map((x) => {
-    const r = x.equity / d.capital - 1;
-    const [short, ...rest] = x.name.split(' · ');
     const on = x.key === c.key;
-    return `<button class="rail-item${on ? ' active' : ''}" data-key="${x.key}" aria-pressed="${on}">
-      <span class="rail-top"><span class="rail-name">${short}</span><b class="${tone(r)}">${fmtSigned(r)}</b></span>
-      <span class="rail-desc">${rest.join(' · ')}</span><span class="rail-facts">${x.contracts ? position(x.contracts).replace(/<[^>]+>/g, '') : '포지션 없음'}</span></button>`;
+    return `<button data-key="${x.key}" class="${on ? 'active' : ''}" aria-pressed="${on}">${x.name.split(' · ')[0]}${x.key === d.live ? ' ★' : ''}</button>`;
   }).join('');
-
-  const price = state.quote ? state.quote.price : null;
-  const pnl = c.contracts && c.entry && price ? c.contracts * d.multiplier * (price - c.entry) : 0;
-  const notional = price ? Math.abs(c.contracts) * price * d.multiplier : 0;
-  $('pos-note').textContent = c.started ? `${fmtTime(c.started)} 시작` : '';
-  $('position').innerHTML = `<div class="pos-big">${position(c.contracts)}</div>` + rows([
-    ...(partsText(c.parts) ? [['갈래별', partsText(c.parts)]] : []),
-    ['평균 진입가', c.entry && c.contracts ? fmtPrice(c.entry) : '-'],
-    ['평가손익', c.contracts ? `<b class="${tone(pnl)}">${fmtMoney(pnl)}</b>` : '-'],
-    ['노출', `${(notional / c.equity).toFixed(2)}배 · ${fmtMoney(notional, 0)}`],
-    ['가상 계좌', `<b>${fmtMoney(c.equity)}</b> <span class="${tone(c.equity - d.capital)}">${fmtSigned(c.equity / d.capital - 1)}</span>`],
-  ]);
-
-  const want = c.signal.contracts;
-  const move = want == null ? null : want - c.contracts;
-  $('next').innerHTML = rows([
-    ...(c.next_intraday ? [['장중 판단', `<b>${fmtTime(c.next_intraday)}</b> <small>(평일 뉴욕 10 ~ 15시 정시, 16시 정리)</small>`]] : []),
-    [c.next_intraday ? '일봉 결정' : '결정 시각', `<b>${fmtTime(d.next_decision)}</b>`],
-    ['지금 신호', `${position(want || 0)} <small>(노출 ${c.signal.expo.toFixed(2)}배, ${d.close[0]} 종가 기준)</small>`],
-    ['지금 결정하면', move == null ? '-' : move === 0 ? '그대로' : `<b class="${tone(move)}">${move > 0 ? '매수' : '매도'} ${Math.abs(move)}계약</b>`],
-  ]) + (d.error ? `<div class="note warn">${d.error}</div>` : '');
   renderWhy(c, d);
   renderLevels();
-
-  $('trades').innerHTML = c.trades.length ? `<table class="trend-table"><thead><tr><th>때</th><th>매매</th><th>가격</th></tr></thead><tbody>${c.trades.slice(0, 20).map((t) => {
-    const move = t.to - t.from;
-    return `<tr><td>${fmtTime(t.time)}${t.sleeve === 'intraday' ? ' <small>장중</small>' : ''}</td><td>${move ? `<b class="${tone(move)}">${move > 0 ? '매수' : '매도'} ${Math.abs(move)}</b> → ${position(t.to)}` : `그대로 ${position(t.to)}`}</td><td>${fmtPrice(t.price)}</td></tr>`;
-  }).join('')}</tbody></table>` : `<p class="empty">아직 자동매매가 없습니다. 첫 결정은 ${fmtTime(d.next_decision)}입니다.</p>`;
   renderMarkers();
 }
 
-// 추천 포지션과 근거: 지금 신호(계약 수)와, 일봉 규칙이 마지막 종가에서 본 값, 장중 갈래의 마지막 판단과 오늘의 경계
+// 지금 포지션(가상 계좌)과 근거: 일봉 규칙이 마지막 종가에서 본 값, 장중 갈래의 마지막 판단과 오늘의 경계
 function renderWhy(c, d) {
-  $('why-note').textContent = `${c.name.split(' · ')[0]}${c.key === d.live ? ' · 자동 주문이 따라가는 후보' : ''}`;
+  const price = state.quote ? state.quote.price : null;
+  const pnl = c.contracts && c.entry && price ? c.contracts * d.multiplier * (price - c.entry) : 0;
+  const r = c.equity / d.capital - 1;
+  $('why-note').textContent = c.key === d.live ? '★ 대회 매매법' : '가상 계좌로만 지켜봄';
   const list = c.explain.map(([k, v]) => [k, v]);
   if (c.noise) {
     const last = c.trades.find((t) => t.sleeve === 'intraday');
@@ -269,13 +243,16 @@ function renderWhy(c, d) {
     const hour = Math.min(15, Math.max(10, nyHour() + 1));
     list.push(['장중 갈래', last ? `${fmtTime(last.time)} ${last.why}` : '아직 판단 없음']);
     list.push([n.today ? '오늘 경계' : `${n.date.slice(5)} 경계`, n.bands[hour]
-      ? `9시 시가 ${fmtPrice(n.open)} → ${hour}시에 <span class="c-up">${fmtPrice(n.bands[hour][0])}</span> 위면 롱, <span class="c-down">${fmtPrice(n.bands[hour][1])}</span> 아래면 숏, 사이면 쉼`
+      ? `9시 시가 ${fmtPrice(n.open)} → ${hour}시에 <span class="c-up">${fmtPrice(n.bands[hour][0])}</span> 위면 롱, <span class="c-down">${fmtPrice(n.bands[hour][1])}</span> 아래면 숏`
       : '-']);
-    if (c.parts) list.push(['합치기', `${partsText(c.parts)} → 더해서 최대 1계약`]);
+    if (c.parts) list.push(['합치기', `${partsText(c.parts)} → 최대 1계약`]);
   }
-  $('why').innerHTML = `<div class="pos-big">${position(c.contracts)}</div>`
-    + `<p class="why-sub">일봉 신호 노출 ${c.signal.expo.toFixed(2)}배 · ${d.close[0]} 나스닥100 종가 기준</p>`
-    + rows(list) + '<p class="why-foot">일봉 규칙의 값은 나스닥100 지수 기준입니다. 차트의 200일선·5일 최저선은 차트의 MNQ 선물로 계산해 수준이 조금 다릅니다.</p>';
+  list.push(['다음 판단', c.scalp ? '평일 뉴욕 9:30 ~ 16시, 1분봉이 마감될 때마다' : `${c.next_intraday ? `장중 ${fmtTime(c.next_intraday)} · ` : ''}일봉 ${fmtTime(d.next_decision)}`]);
+  $('why').innerHTML = `<div class="why-head"><span class="pos-big">${position(c.contracts)}</span><span class="why-acct">`
+    + (c.contracts && c.entry ? `진입 ${fmtPrice(c.entry)} · <b class="${tone(pnl)}">${fmtMoney(pnl)}</b><br>` : '')
+    + `가상 계좌 <b class="${tone(r)}">${fmtSigned(r)}</b></span></div>`
+    + rows(list) + (d.error ? `<div class="note warn">${d.error}</div>` : '')
+    + '<p class="why-foot">근거의 값은 나스닥100 지수 기준이고, 차트의 선들은 MNQ 선물로 계산해 수준이 조금 다릅니다.</p>';
 }
 
 function renderQuote() {
@@ -288,15 +265,6 @@ function renderQuote() {
   $('change').className = 'change ' + tone(q.diff);
   $('change').textContent = `${q.diff >= 0 ? '+' : ''}${fmtPrice(q.diff)} (${fmtSigned(change)})`;
   document.title = `${fmtPrice(q.price)} ${q.symbol} | MNQ Trader`;
-  $('quote-note').textContent = `${q.time.slice(4, 6)}-${q.time.slice(6, 8)} ${q.time.slice(8, 10)}:${q.time.slice(10, 12)}:${q.time.slice(12, 14)} 기준`;
-  $('quote').innerHTML = rows([
-    ['시가 · 고가 · 저가', `${fmtPrice(q.open)} · <span class="c-up">${fmtPrice(q.high)}</span> · <span class="c-down">${fmtPrice(q.low)}</span>`],
-    ['전일 종가', fmtPrice(q.prev)],
-    ['거래량', `${q.volume.toLocaleString('en-US')}계약`],
-    ['1계약', `가격 × $2 = <b>${fmtMoney(q.price * 2, 0)}</b> · 1틱 ${q.tick} = ${fmtMoney(q.tick_value)}`],
-    ['개시증거금', `${fmtMoney(q.margin, 0)} / 계약`],
-    ['만기', `${q.expiry.slice(0, 4)}-${q.expiry.slice(4, 6)}-${q.expiry.slice(6)}`],
-  ]);
   renderSide();
   renderAccount();
 }
@@ -314,16 +282,24 @@ async function tickBars() {
 }
 // LS 모의계좌: 따라가는 후보, 목표와 실제 계약 수, 지금 주문하지 않는 까닭, 최근 주문
 function renderLive(d) {
-  const name = state.trading ? (state.trading.candidates.find((c) => c.key === d.candidate) || {}).name || d.candidate : d.candidate;
-  $('live-note').textContent = d.enabled ? (d.started ? '켜짐' : `${fmtTime(d.start)} 대회 시작부터`) : '꺼짐(작업 표시줄 아이콘에서 켬)';
-  const orders = d.orders.slice(0, 5).map((o) => `<tr><td>${fmtTime(o.time)}</td><td>${o.ok ? `<b class="${tone(o.qty)}">${o.manual ? '직접 ' : ''}${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}</b> (${o.from} → ${o.to})` : `<span class="c-down">실패</span> ${o.error || ''}`}</td></tr>`).join('');
+  const pick = $('live-pick');
+  if (document.activeElement !== pick) {  // 고르는 중에는 다시 그리지 않는다
+    pick.innerHTML = Object.entries(d.choices).map(([k, n]) => `<option value="${k}"${k === d.candidate ? ' selected' : ''}>${n.split(' · ')[0]}</option>`).join('');
+  }
+  $('live-note').textContent = d.started ? '' : `${fmtTime(d.start)} 대회 시작부터`;
+  const orders = d.orders.slice(0, 3).map((o) => `<tr><td>${fmtTime(o.time)}</td><td>${o.ok ? `<b class="${tone(o.qty)}">${o.manual ? '직접 ' : o.filler ? '횟수 채우기 ' : ''}${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}</b> (${o.from} → ${o.to})` : `<span class="c-down">실패</span> ${o.error || ''}`}</td></tr>`).join('');
+  const t = $('auto-toggle');
+  t.textContent = d.enabled ? '자동 주문 켜짐' : '자동 주문 꺼짐';
+  t.classList.toggle('active', d.enabled);
+  t.setAttribute('aria-pressed', d.enabled);
+  t.dataset.on = d.enabled;
   $('trade-buttons').querySelectorAll('button').forEach((b) => {
     b.disabled = !d.started;
     b.title = d.started ? '' : '대회 시작부터 누를 수 있습니다';
   });
   $('live').innerHTML = rows([
-    ['자동 주문', `${d.enabled ? '<b class="c-up">켜짐</b>' : '<b>꺼짐</b> <small>(작업 표시줄 아이콘에서 켬)</small>'} · ${name.split(' · ')[0]} 따라감`],
     ['목표 / 실제', d.target == null ? '-' : `${position(d.target)} / ${position(d.actual)}`],
+    ['이번 주 체결', d.week == null ? '-' : `<b class="${d.week >= d.min_weekly ? 'c-up' : ''}">${d.week}</b> / ${d.min_weekly}건 <small>(모자라면 금요일 뉴욕 14시부터 채움)</small>`],
     ['상태', d.error ? `<span class="c-down">${d.error}</span>` : d.note || '-'],
   ]) + (orders ? `<table class="trend-table"><tbody>${orders}</tbody></table>` : '<p class="empty">아직 주문이 없습니다.</p>');
 }
@@ -343,6 +319,34 @@ $('trade-buttons').addEventListener('click', async (e) => {
   }
   api('/api/live').then(renderLive).catch(() => {});
   tickAccount();
+});
+
+// 대회 매매법 바꾸기: 자동 주문이 켜져 있으면 30초 안에 새 매매법의 목표 계약 수로 맞추는 주문이 나가므로 한 번 묻는다
+$('live-pick').addEventListener('change', async (e) => {
+  const key = e.target.value;
+  if (!confirm(`대회 매매법을 "${e.target.selectedOptions[0].text}"(으)로 바꿀까요?
+자동 주문이 켜져 있으면 30초 안에 그 매매법의 목표 계약 수로 맞추는 주문이 나갑니다.`)) {
+    api('/api/live').then(renderLive).catch(() => {});
+    return;
+  }
+  try {
+    renderLive(await post('/api/live/candidate', { key }));
+    state.candidate = key;
+    tickTrading();
+  } catch (err) {
+    alert('바꾸지 못했습니다: ' + err.message);
+  }
+});
+
+// 자동 주문 켜고 끄기. 켜면 30초 안에 실제 포지션을 목표 계약 수에 맞추는 주문이 나갈 수 있어 한 번 묻는다(끄기는 포지션을 건드리지 않는다)
+$('auto-toggle').addEventListener('click', async () => {
+  const on = $('auto-toggle').dataset.on !== 'true';
+  if (on && !confirm('자동 주문을 켤까요?\n30초 안에 실제 포지션을 목표 계약 수에 맞추는 시장가 주문이 나갈 수 있습니다.')) return;
+  try {
+    renderLive(await post('/api/live/enabled', { on }));
+  } catch (err) {
+    alert('바꾸지 못했습니다: ' + err.message);
+  }
 });
 
 // 차트 아래 칸: LS 모의계좌의 실제 자산과 포지션. MNQ 손익은 실시간 시세로 다시 계산해 0.5초마다 움직이게 한다

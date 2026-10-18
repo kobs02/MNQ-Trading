@@ -1,4 +1,4 @@
-"""LS 모의계좌 자동 주문: 모의 운용 후보 하나(config.LIVE["candidate"])의 가상 계좌 계약 수를 목표로, 실제 포지션과의 차이만 시장가로 낸다.
+"""LS 모의계좌 자동 주문: 대회 매매법으로 고른 후보 하나(candidate(), 기본은 config.LIVE["candidate"])의 가상 계좌 계약 수를 목표로, 실제 포지션과의 차이만 시장가로 낸다.
 
 모의 운용(mnq/paper.py)이 두뇌, 이 파일이 손이다. 무엇을 살지는 여기서 정하지 않는다.
 - 대회 시작(config.LIVE["start"]) 전에는 계산만 하고 주문하지 않는다
@@ -19,6 +19,7 @@ from . import config, console, ls, paper
 
 log = logging.getLogger(__name__)
 NY = ZoneInfo("America/New_York")
+KST = ZoneInfo("Asia/Seoul")
 PATH = config.STORE / "live.json"
 CONFIRM = 90       # 주문을 낸 뒤 이만큼(초)은 새로 내지 않고 체결을 확인한다
 EVERY = 30
@@ -79,9 +80,25 @@ def enabled():
         return _load()["enabled"]
 
 
+def candidate():
+    """대회 매매법: 화면에서 고른 후보(store/live.json). 없거나 지금 후보 목록에 없으면 config.LIVE["candidate"]."""
+    key = _load().get("candidate")
+    return key if key in config.CANDIDATES and not config.CANDIDATES[key].get("watch") else config.LIVE["candidate"]
+
+
+def set_candidate(key):
+    """대회 매매법을 바꾼다. 자동 주문이 켜져 있으면 다음 확인(30초 안)에 새 후보의 목표 계약 수로 맞춘다."""
+    if key not in config.CANDIDATES or config.CANDIDATES[key].get("watch"):
+        raise ValueError(f"대회 매매법으로 고를 수 없는 후보입니다: {key}")
+    with _lock:
+        _load()["candidate"] = key
+        _save()
+    log.warning("LS 모의계좌: 대회 매매법을 %s(으)로 바꿨습니다", config.CANDIDATES[key]["name"].split(" · ")[0])
+
+
 def _target():
     """따라가는 후보의 가상 계좌 계약 수."""
-    acct = paper._load().get(config.LIVE["candidate"]) or {}
+    acct = paper._load().get(candidate()) or {}
     return int(acct.get("contracts", 0))
 
 
@@ -127,6 +144,18 @@ def manual(qty):
     return entry
 
 
+def week_fills(orders, now=None):
+    """이번 주(대회가 쓰는 한국 시각, 월 ~ 일)에 접수된 주문 수."""
+    week = lambda t: datetime.fromtimestamp(t, KST).isocalendar()[:2]
+    this = week(now or time.time())
+    return sum(1 for o in orders if o.get("ok") and week(o["time"]) == this)
+
+
+def filler_due(orders, ny, now=None):
+    """주간 최소 거래(대회 규정 '주당 2회 이상', '회'가 왕복일 수도 있어 체결 MIN_WEEKLY건)를 채워야 하는가: 금요일 뉴욕 14 ~ 17시에 모자랄 때."""
+    return ny.weekday() == 4 and 14 <= ny.hour < 17 and week_fills(orders, now) < config.LIVE["min_weekly"]
+
+
 def tick():
     with _busy:
         _tick()
@@ -149,6 +178,7 @@ def _tick():
         sent_today = sum(1 for o in state["orders"] if o.get("day") == today and o.get("ok"))
         last = state["orders"][-1] if state["orders"] else None
         why = None
+        status["week"] = week_fills(state["orders"], now)
         if state.get("flatten"):
             target = status["target"] = 0
             if actual == 0:
@@ -159,7 +189,7 @@ def _tick():
             why = "자동 주문이 꺼져 있습니다"
         elif not started(now):
             why = f"대회 시작({datetime.fromtimestamp(config.LIVE['start']):%m-%d %H:%M}) 전이라 주문하지 않습니다"
-        elif target == actual:
+        elif target == actual and not filler_due(state["orders"], ny, now):
             why = "목표와 같습니다"
         elif abs(target) > config.LIVE["max_contracts"]:
             why = f"목표 {target}계약이 최대({config.LIVE['max_contracts']}계약)를 넘어 내지 않습니다"
@@ -177,13 +207,15 @@ def _tick():
     if pending:
         status["note"] = f"미체결 주문 {len(pending)}건이 있어 기다립니다"
         return
-    qty = target - actual
-    entry = {"time": int(now), "day": ny.strftime("%Y-%m-%d"), "symbol": symbol, "qty": qty, "from": actual, "to": target,
-             "price": paper.status["price"]}
+    # 목표와 같은데 여기 왔으면 주간 최소 거래 채우기: 0 쪽으로 1계약(없으면 매수 1) 벗어났다가, 다음 확인 때 위 맞추기가 되돌린다(체결 2건)
+    filler = target == actual
+    qty = (-1 if actual > 0 else 1) if filler else target - actual
+    entry = {"time": int(now), "day": ny.strftime("%Y-%m-%d"), "symbol": symbol, "qty": qty, "from": actual, "to": actual + qty,
+             "price": paper.status["price"], **({"filler": True} if filler else {})}
     try:
         entry.update(ok=True, number=ls.market_order(symbol, qty))
-        console.success(log, "LS 모의계좌 주문: %s %d계약 (%d → %d, 목표 = %s 가상 계좌) 주문번호 %s", "매수" if qty > 0 else "매도",
-                        abs(qty), actual, target, config.LIVE["candidate"], entry["number"])
+        console.success(log, "LS 모의계좌 주문: %s %d계약 (%d → %d, %s) 주문번호 %s", "매수" if qty > 0 else "매도", abs(qty), actual, actual + qty,
+                        f"주간 최소 거래 채우기, 이번 주 {status['week']}건" if filler else f"목표 = {candidate()} 가상 계좌", entry["number"])
     except Exception as e:
         entry.update(ok=False, error=str(e))
         log.error("LS 모의계좌 주문 실패: %s %d계약 · %s", "매수" if qty > 0 else "매도", abs(qty), e)
@@ -239,8 +271,9 @@ def get_live():
     """화면용: 연결 상태, 목표와 실제, 최근 주문."""
     with _lock:
         state = json.loads(json.dumps(_load()))
-    return {"enabled": state["enabled"], "started": started(), "start": config.LIVE["start"], "candidate": config.LIVE["candidate"],
-            "max_contracts": config.LIVE["max_contracts"], **status, "orders": state["orders"][::-1][:20]}
+    return {"enabled": state["enabled"], "started": started(), "start": config.LIVE["start"], "candidate": candidate(),
+            "choices": {k: c["name"] for k, c in config.CANDIDATES.items() if not c.get("watch")},
+            "max_contracts": config.LIVE["max_contracts"], "min_weekly": config.LIVE["min_weekly"], **status, "orders": state["orders"][::-1][:20]}
 
 
 if __name__ == "__main__":
@@ -301,4 +334,31 @@ if __name__ == "__main__":
         except ValueError:
             pass
     assert sent == [2, -3, 1, -2]
+    # 주간 최소 거래: 목표와 같아도 모자라면 0 쪽으로 1계약, 다음 확인 때 목표로 되돌린다
+    _state.update(enabled=True)
+    _state["orders"][-1]["time"] -= CONFIRM + 1
+    paper._load = lambda: {config.LIVE["candidate"]: {"contracts": -2}}
+    filler_due = lambda orders, ny, now=None: True
+    tick()
+    assert sent[-1] == 1 and _state["orders"][-1]["filler"], sent  # 숏 2 → 숏 1
+    _state["orders"][-1]["time"] -= CONFIRM + 1
+    book["pos"] = -1
+    tick()
+    assert sent[-1] == -1, sent                  # 다시 숏 2로
+    # 주 세기(한국 시각 월 ~ 일)와 금요일 뉴욕 14 ~ 17시
+    mon = datetime(2026, 10, 19, 8, tzinfo=KST).timestamp()
+    assert week_fills([{"ok": True, "time": mon}, {"ok": True, "time": mon - 9 * 3600}, {"ok": False, "time": mon}], mon) == 1
+    fri = datetime(2026, 10, 23, 14, 30, tzinfo=NY)
+    import mnq.live as original  # 위에서 바꿔 끼운 것 말고 원래 함수로 확인
+    assert original.filler_due([], fri, fri.timestamp()) and not original.filler_due([], fri.replace(hour=13), fri.timestamp())
+    assert not original.filler_due([{"ok": True, "time": mon}] * 4, fri, fri.timestamp())
+    # 대회 매매법 고르기: 목록에 있는 것만, 고른 후보의 계약 수를 목표로
+    set_candidate("dip_trend")
+    paper._load = lambda: {"dip_trend": {"contracts": 2}, config.LIVE["candidate"]: {"contracts": 0}}
+    assert candidate() == "dip_trend" and _target() == 2
+    try:
+        set_candidate("scalp")  # 관찰용은 못 고른다
+        raise AssertionError("없는 후보를 받았다")
+    except ValueError:
+        pass
     print("live 점검 통과")
