@@ -491,7 +491,7 @@ function renderMarkers() {
   if (entryLine) series.removePriceLine(entryLine);
   entryLine = c.contracts && c.entry ? series.createPriceLine({
     price: c.entry, color: c.contracts > 0 ? UP : DOWN, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
-    axisLabelVisible: true, title: `평균 진입 ${position(c.contracts).replace(/<[^>]+>/g, '')}`,
+    axisLabelVisible: true, title: `가상 진입 ${position(c.contracts).replace(/<[^>]+>/g, '')}`,
   }) : null;
 }
 
@@ -661,6 +661,7 @@ function renderAccount() {
     const pnl = q && q.symbol === p.symbol ? p.qty * mult * (price - p.entry) : p.pnl;
     return { ...p, price, pnl, roe: p.margin ? pnl / p.margin : null, of_capital: pnl / a.capital };
   });
+  renderRealEntry(pos.find((p) => q && p.symbol === q.symbol));
   const pnl = pos.reduce((s, p) => s + p.pnl, 0);
   const equity = a.deposit + pnl;
   $('account-note').textContent = `${fmtTime(a.at)} 조회`;
@@ -675,6 +676,25 @@ function renderAccount() {
     `<tr><td><b>${p.symbol}</b></td><td>${position(p.qty)}</td><td>${fmtPrice(p.entry)}</td><td>${fmtPrice(p.price)}</td><td>${p.liq ? fmtPrice(p.liq) : '없음 <small>(계좌 충분)</small>'}</td>
     <td><b class="${tone(p.pnl)}">${fmtMoney(p.pnl)}</b> <span class="${tone(p.pnl)}">(${fmtSigned(p.roe)})</span></td><td class="${tone(p.pnl)}">${fmtSigned(p.of_capital, 3)}</td><td>${fmtMoney(p.margin, 0)}</td></tr>`).join('')}</tbody></table>`
     : '<p class="empty">들고 있는 포지션이 없습니다.</p>';
+}
+
+// LS 모의계좌의 실제 진입가: 차트에 실선(가상 계좌의 점선과 구분), 주문 칸에 진입가와 수익률(가격 움직임 기준, 괄호 안은 손익과 계좌 대비)
+let realLine = null, realKey = '';
+function renderRealEntry(p) {
+  const key = p ? `${p.qty}|${p.entry}` : '';
+  if (key !== realKey) {  // 0.5초마다 불리므로 진입가나 계약 수가 바뀔 때만 다시 그린다
+    realKey = key;
+    if (realLine) series.removePriceLine(realLine);
+    realLine = p ? series.createPriceLine({
+      price: p.entry, color: p.qty > 0 ? UP : DOWN, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
+      axisLabelVisible: true, title: `실제 진입 ${position(p.qty).replace(/<[^>]+>/g, '')}`,
+    }) : null;
+  }
+  const move = p ? Math.sign(p.qty) * (p.price / p.entry - 1) : 0;
+  $('live-pos').innerHTML = p ? rows([
+    ['실제 진입', `${position(p.qty)} @ <b>${fmtPrice(p.entry)}</b>`],
+    ['수익률', `<b class="${tone(move)}">${fmtSigned(move)}</b> <small>(${fmtMoney(p.pnl)} · 계좌 ${fmtSigned(p.of_capital, 3)})</small>`],
+  ]) : rows([['실제 진입', '포지션 없음']]);
 }
 
 async function tickAccount() {
