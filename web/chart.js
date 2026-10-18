@@ -28,6 +28,7 @@ const state = {
   trading: null,
   signals: null,     // 후보마다 2021년부터 규칙대로 계약 수를 바꾼 날들(일봉에 표시)
   replay: null,      // 후보마다 최근 2년 1시간봉으로 돌린 계약 수 변화(분봉에 표시)
+  dailyCloses: null, // 일봉 종가(분봉에도 200일선·5일 최저 종가를 가로선으로 그리는 용도)
   generation: 0,     // 봉 단위를 바꿀 때마다 늘린다. 늦게 온 이전 응답을 버리는 용도
   loadingOlder: false,
   noOlder: false,    // 더 과거의 봉이 서버(LS)에 없다
@@ -95,6 +96,8 @@ async function loadBars(fresh) {
   $('chart-msg').hidden = d.bars.length > 0;
   renderQuote();
   renderMarkers();
+  renderStudies();
+  renderDrawings();
   if (!legendHover) renderLegend(d.bars[d.bars.length - 1]);
 }
 
@@ -113,6 +116,7 @@ async function loadOlder() {
       series.setData(state.bars.map(shifted));
       if (range) chart.timeScale().setVisibleLogicalRange({ from: range.from + d.bars.length, to: range.to + d.bars.length });
       renderMarkers();
+      renderStudies();
     }
   } catch (e) { /* 다음에 끌 때 다시 */ } finally {
     state.loadingOlder = false;
@@ -149,7 +153,7 @@ let levelsKey = null;
 function renderLevels() {
   const c = current();
   // 0.5초마다 불리므로 후보·봉 단위·봉 개수·경계·시가 바뀔 때만 다시 그린다
-  const key = c && [state.interval, c.key, state.bars.length, JSON.stringify(c.noise), nyHour()].join('|');
+  const key = c && [state.interval, c.key, state.bars.length, JSON.stringify(c.noise), nyHour(), (state.dailyCloses || []).length].join('|');
   if (key === levelsKey) return;
   levelsKey = key;
   const daily = state.interval === 'D' && c;
@@ -159,15 +163,296 @@ function renderLevels() {
   lowSeries.setData(daily && c.rule === 'dip_trend' ? roll(5, (w) => Math.min(...w)) : []);
   levelLines.forEach((l) => series.removePriceLine(l));
   levelLines = [];
-  const n = c && state.interval !== 'D' ? c.noise : null;
+  if (!c || state.interval === 'D') return;
+  const line = (price, color, title) => levelLines.push(series.createPriceLine({ price, color, title, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true }));
+  // 분봉: 일봉 지표의 지금 값(일봉 화면의 두 선의 마지막 값)을 가로선으로. 화면의 가격 범위 밖이면 보이지 않는다
+  const dc = state.dailyCloses;
+  if (dc && dc.length >= 200 && c.rule !== 'flat') {
+    line(dc.slice(-200).reduce((a, v) => a + v, 0) / 200, token('--accent'), '200일선');
+    if (c.rule === 'dip_trend') line(Math.min(...dc.slice(-5)), token('--text-3'), '5일 최저 종가');
+  }
+  const n = c.noise;
   if (!n || !n.today) return;
   const hour = Math.min(15, Math.max(10, nyHour() + 1));
   const band = n.bands[hour];
-  const line = (price, color, title) => levelLines.push(series.createPriceLine({ price, color, title, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true }));
   line(n.open, token('--text-3'), '9시 시가');
   if (band) {
     line(band[0], UP, `${hour}시 판단: 위로 넘으면 롱`);
     line(band[1], DOWN, `${hour}시 판단: 아래로 넘으면 숏`);
+  }
+}
+
+// ---------- 차트 도구: 수평선·박스 그리기, MACD·RSI ----------
+// 그린 것은 시각(봉 시작, 밀기 전)·가격으로 저장해 봉 단위를 바꿔도 같은 자리에 그린다. 저장은 이 브라우저(localStorage)에만
+const load = (k, v) => { try { return JSON.parse(localStorage.getItem(k)) || v; } catch (e) { return v; } };
+const keep = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 저장 못 해도 화면은 그대로 */ } };
+const draw = { tool: null, start: null, hover: null, mouse: null, ichi: null, selected: null, items: load('mnqDraw', []), studies: load('mnqStudies', { macd: false, rsi: false, ichimoku: false }) };
+const hlines = new Map();  // 수평선 항목 → 가격선 객체
+
+// 시각 → 지금 봉 단위에서 그 시각이 들어가는 봉의 x 좌표(봉 사이 시각도 그 봉으로)
+function timeX(t) {
+  const bars = state.bars;
+  if (!bars.length) return null;
+  let lo = 0, hi = bars.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (bars[mid].time <= t) lo = mid; else hi = mid - 1; }
+  return chart.timeScale().logicalToCoordinate(lo);
+}
+function pointAt(p) {
+  if (!p || !p.point || !state.bars.length) return null;
+  const i = Math.max(0, Math.min(state.bars.length - 1, Math.round(chart.timeScale().coordinateToLogical(p.point.x))));
+  const price = series.coordinateToPrice(p.point.y);
+  return price == null ? null : { time: state.bars[i].time, price: Math.round(price * 4) / 4 };  // 0.25틱에 맞춘다
+}
+
+function renderDrawings() {
+  // 수평선: 가격선으로(가격 축에 값이 보인다)
+  const want = new Set(draw.items.filter((d) => d.type === 'hline'));
+  hlines.forEach((line, d) => { if (!want.has(d)) { series.removePriceLine(line); hlines.delete(d); } });
+  want.forEach((d) => {
+    if (!hlines.has(d)) hlines.set(d, series.createPriceLine({ price: d.price, color: token('--accent'), lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: '' }));
+    const on = d === draw.selected;  // 고른 선은 굵은 점선
+    hlines.get(d).applyOptions({ lineWidth: on ? 2 : 1, lineStyle: on ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid });
+  });
+  // 박스: 그리기 층(SVG)에. 그리는 중이면 커서까지 미리 보여 준다
+  const boxes = draw.items.filter((d) => d.type === 'box');
+  if (draw.start && draw.hover) boxes.push({ a: draw.start, b: draw.hover, preview: true });
+  const color = token('--accent');
+  $('draw').innerHTML = renderCloud(chart.timeScale().width()) + boxes.map((d) => {
+    const r = boxRect(d);
+    if (!r) return '';
+    const on = d === draw.selected;
+    return `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="${color}" fill-opacity="${d.preview ? 0.03 : on ? 0.12 : 0.06}" stroke="${color}" stroke-width="${on ? 2 : 1}"${d.preview || on ? ' stroke-dasharray="4 3"' : ''}/>`;
+  }).join('');
+}
+
+// 박스의 화면 사각형(차트 칸 안으로 자른 것). 화면 밖이면 null
+function boxRect(d) {
+  const x1 = timeX(d.a.time), x2 = timeX(d.b.time), y1 = series.priceToCoordinate(d.a.price), y2 = series.priceToCoordinate(d.b.price);
+  if ([x1, x2, y1, y2].some((v) => v == null)) return null;
+  const x = Math.max(0, Math.min(x1, x2)), w = Math.min(chart.timeScale().width(), Math.max(x1, x2)) - x;
+  return w > 0 ? { x, y: Math.min(y1, y2), w, h: Math.abs(y2 - y1) } : null;
+}
+
+// 누른 자리에 있는 그린 것(위에 그린 것부터): 수평선은 위아래 5px, 박스는 안쪽이나 테두리 4px 안
+function hitTest(pt) {
+  if (!pt) return null;
+  for (let i = draw.items.length - 1; i >= 0; i--) {
+    const d = draw.items[i];
+    if (d.type === 'hline') {
+      const y = series.priceToCoordinate(d.price);
+      if (y != null && Math.abs(y - pt.y) <= 5) return d;
+    } else {
+      const r = boxRect(d);
+      if (r && pt.x >= r.x - 4 && pt.x <= r.x + r.w + 4 && pt.y >= r.y - 4 && pt.y <= r.y + r.h + 4) return d;
+    }
+  }
+  return null;
+}
+function select(d) {
+  draw.selected = d;
+  renderDrawings();
+}
+function removeSelected() {
+  draw.items = draw.items.filter((d) => d !== draw.selected);
+  keep('mnqDraw', draw.items);
+  select(null);
+}
+
+// 일목 구름: 선행스팬 A·B는 26봉 앞(미래)까지 나가므로 차트 선 대신 그리기 층에. A가 위면 초록, 아래면 빨강 구름
+function renderCloud(width) {
+  const k = draw.ichi;
+  if (!k) return '';
+  const ts = chart.timeScale(), range = ts.getVisibleLogicalRange();
+  if (!range) return '';
+  const pts = [];
+  for (let i = Math.max(0, Math.floor(range.from) - 1); i <= Math.min(k.a.length - 1, Math.ceil(range.to) + 1); i++) {
+    if (k.a[i] == null || k.b[i] == null) continue;
+    const x = ts.logicalToCoordinate(i), ya = series.priceToCoordinate(k.a[i]), yb = series.priceToCoordinate(k.b[i]);
+    if (x != null && ya != null && yb != null) pts.push({ x, ya, yb, up: k.a[i] >= k.b[i] });
+  }
+  let out = '';
+  for (let i = 1; i < pts.length; i++) {
+    const p = pts[i - 1], q = pts[i];
+    out += `<polygon points="${p.x},${p.ya} ${q.x},${q.ya} ${q.x},${q.yb} ${p.x},${p.yb}" fill="${q.up ? UP : DOWN}" fill-opacity="0.12"/>`;
+  }
+  const line = (key, color) => `<polyline points="${pts.map((p) => `${p.x},${p[key]}`).join(' ')}" fill="none" stroke="${color}" stroke-width="1" stroke-opacity="0.8"/>`;
+  return pts.length > 1 ? `<svg x="0" y="0" width="${width}" overflow="hidden">${out}${line('ya', UP)}${line('yb', DOWN)}</svg>` : '';
+}
+
+function renderTools() {
+  $('tools').querySelectorAll('button').forEach((b) => {
+    if (b.dataset.tool === 'clear') return;
+    const on = b.dataset.tool ? draw.tool === b.dataset.tool : Boolean(draw.studies[b.dataset.study]);
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', on);
+  });
+}
+function setTool(tool) {
+  draw.tool = draw.tool === tool ? null : tool;
+  draw.start = draw.hover = null;
+  $('chart-wrap').classList.toggle('drawing', Boolean(draw.tool));
+  renderTools();
+  renderDrawings();
+}
+$('tools').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.study) {
+    draw.studies[b.dataset.study] = !draw.studies[b.dataset.study];
+    keep('mnqStudies', draw.studies);
+    renderTools();
+    renderStudies();
+    renderDrawings();
+  } else if (b.dataset.tool === 'clear') {
+    // 고른 것이 있으면 그것만, 없으면 한 번 묻고 모두
+    if (draw.selected) removeSelected();
+    else if (draw.items.length && confirm('고른 것이 없습니다. 그린 수평선과 박스를 모두 지울까요?')) {
+      draw.items = [];
+      keep('mnqDraw', draw.items);
+      setTool(null);
+    }
+  } else setTool(b.dataset.tool);
+});
+const addItem = (item) => { draw.items.push(item); keep('mnqDraw', draw.items); renderDrawings(); };
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && draw.tool) setTool(null);
+  // Delete(또는 Backspace): 고른 수평선·박스를 지운다. 글을 고르는 칸에 있을 때는 그대로 둔다
+  if ((e.key === 'Delete' || e.key === 'Backspace') && draw.selected && !/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) {
+    e.preventDefault();
+    removeSelected();
+  }
+  // Alt + H: 마우스가 있는 가격에 수평선
+  if (e.altKey && e.code === 'KeyH' && draw.mouse) {
+    e.preventDefault();
+    addItem({ type: 'hline', price: draw.mouse.price });
+  }
+});
+// Shift + 드래그: 드래그한 자리에 박스. 그동안은 차트가 끌려 움직이지 않게 이벤트를 차트에 넘기지 않는다
+(function () {
+  const wrap = $('chart-wrap');
+  let dragging = false;
+  const at = (e) => {
+    const r = $('chart').getBoundingClientRect();
+    return pointAt({ point: { x: e.clientX - r.left, y: e.clientY - r.top } });
+  };
+  wrap.addEventListener('pointerdown', (e) => {
+    if (!e.shiftKey || e.button !== 0) return;
+    const start = at(e);
+    if (!start) return;
+    e.stopPropagation();
+    e.preventDefault();
+    dragging = true;
+    draw.start = start;
+    draw.hover = start;
+    try { wrap.setPointerCapture(e.pointerId); } catch (err) { /* 잡지 못해도 차트 안에서는 그대로 그려진다 */ }
+    const move = (ev) => { ev.stopPropagation(); draw.hover = at(ev) || draw.hover; renderDrawings(); };
+    const up = (ev) => {
+      ev.stopPropagation();
+      wrap.removeEventListener('pointermove', move, true);
+      const end = at(ev) || draw.hover;
+      dragging = false;
+      draw.start = draw.hover = null;
+      if (end && (end.time !== start.time || end.price !== start.price)) addItem({ type: 'box', a: start, b: end });
+      else renderDrawings();
+    };
+    wrap.addEventListener('pointermove', move, true);
+    wrap.addEventListener('pointerup', up, { capture: true, once: true });
+  }, true);
+  // 차트 라이브러리는 마우스 이벤트로도 끌기를 하므로 Shift를 누른 동안은 그것도 막는다
+  ['mousedown', 'mousemove', 'mouseup'].forEach((t) => wrap.addEventListener(t, (e) => { if (e.shiftKey || dragging) e.stopPropagation(); }, true));
+})();
+chart.subscribeClick((p) => {
+  if (!draw.tool) {
+    select(hitTest(p.point));  // 도구가 꺼져 있으면 누른 것을 고른다(빈 곳이면 고르기 풀기)
+    return;
+  }
+  const at = pointAt(p);
+  if (!at) return;
+  if (draw.tool === 'hline') {
+    draw.items.push({ type: 'hline', price: at.price });
+  } else if (!draw.start) {
+    draw.start = at;
+    return;
+  } else {
+    draw.items.push({ type: 'box', a: draw.start, b: at });
+  }
+  keep('mnqDraw', draw.items);
+  setTool(null);
+});
+chart.subscribeCrosshairMove((p) => {
+  draw.mouse = pointAt(p);  // Alt + H가 쓸 마우스 자리
+  if (!draw.start) return;
+  draw.hover = draw.mouse;
+  renderDrawings();
+});
+chart.timeScale().subscribeVisibleLogicalRangeChange(() => renderDrawings());
+new ResizeObserver(() => renderDrawings()).observe($('chart-wrap'));
+
+// 보조 지표: 같은 차트 아래쪽에 따로 띄운 가격 축(칸)에. 지금 보는 봉 단위의 종가로 계산한다
+const ema = (xs, n) => { const k = 2 / (n + 1); let e = xs[0]; return xs.map((x) => (e = x * k + e * (1 - k))); };
+const studyLine = (scale, color, title) => chart.addLineSeries({ priceScaleId: scale, color, title, lineWidth: 1, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false });
+const rsiSeries = studyLine('rsi', '#a78bfa', 'RSI 14');
+const macdHist = chart.addHistogramSeries({ priceScaleId: 'macd', priceLineVisible: false, lastValueVisible: false });
+const macdSeries = studyLine('macd', '#60a5fa', 'MACD');
+const signalSeries = studyLine('macd', '#f59e0b', 'Signal');
+// 일목균형표: 전환선·기준선·후행스팬은 본 차트의 선으로, 선행스팬 A·B와 구름은 그리기 층에(renderCloud)
+const ichiLine = (color, title) => chart.addLineSeries({ color, title, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+const tenkanSeries = ichiLine('#38bdf8', '전환선');
+const kijunSeries = ichiLine('#f472b6', '기준선');
+const chikouSeries = ichiLine('#a3a3a3', '후행스팬');
+[70, 30].forEach((v) => rsiSeries.createPriceLine({ price: v, color: token('--text-3'), lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false, title: String(v) }));
+
+function renderStudies() {
+  const { macd, rsi } = draw.studies;
+  const n = (macd ? 1 : 0) + (rsi ? 1 : 0);
+  // 칸 나누기: 지표 하나에 아래 20%씩, 본 차트는 그 위
+  series.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.05 + 0.2 * n } });
+  if (rsi) chart.priceScale('rsi').applyOptions({ scaleMargins: { top: macd ? 0.6 : 0.8, bottom: macd ? 0.22 : 0.02 } });
+  if (macd) chart.priceScale('macd').applyOptions({ scaleMargins: { top: 0.8, bottom: 0.02 } });
+  const bars = state.bars, closes = bars.map((b) => b.close), at = (i) => bars[i].time + TZ;
+  if (rsi && bars.length > 15) {
+    // RSI 14(와일더 평균)
+    let up = 0, down = 0;
+    const out = [];
+    for (let i = 1; i < bars.length; i++) {
+      const ch = closes[i] - closes[i - 1];
+      up = (up * 13 + Math.max(ch, 0)) / 14;
+      down = (down * 13 + Math.max(-ch, 0)) / 14;
+      if (i >= 14) out.push({ time: at(i), value: down ? 100 - 100 / (1 + up / down) : 100 });
+    }
+    rsiSeries.setData(out);
+  } else rsiSeries.setData([]);
+  if (macd && bars.length > 35) {
+    const fast = ema(closes, 12), slow = ema(closes, 26);
+    const line = closes.map((_, i) => fast[i] - slow[i]);
+    const sig = ema(line, 9);
+    const from = 26;  // 앞쪽은 평균이 덜 쌓여 그리지 않는다
+    macdSeries.setData(line.slice(from).map((v, i) => ({ time: at(i + from), value: v })));
+    signalSeries.setData(sig.slice(from).map((v, i) => ({ time: at(i + from), value: v })));
+    macdHist.setData(line.slice(from).map((v, i) => ({ time: at(i + from), value: v - sig[i + from], color: (v - sig[i + from] >= 0 ? UP : DOWN) + '99' })));
+  } else [macdSeries, signalSeries, macdHist].forEach((x) => x.setData([]));
+  if (draw.studies.ichimoku && bars.length > 52) {
+    // 전환선 9, 기준선 26: 그 기간 고가·저가의 가운데. 선행스팬 A = (전환 + 기준) / 2, B = 52기간 가운데, 둘 다 26봉 앞에. 후행스팬 = 종가를 26봉 뒤에
+    const mid = (i, n) => {
+      if (i < n - 1) return null;
+      let hi = -Infinity, lo = Infinity;
+      for (let j = i - n + 1; j <= i; j++) { hi = Math.max(hi, bars[j].high); lo = Math.min(lo, bars[j].low); }
+      return (hi + lo) / 2;
+    };
+    const tenkan = bars.map((_, i) => mid(i, 9)), kijun = bars.map((_, i) => mid(i, 26));
+    const a = new Array(bars.length + 26).fill(null), b = new Array(bars.length + 26).fill(null);
+    bars.forEach((_, i) => {
+      if (tenkan[i] != null && kijun[i] != null) a[i + 26] = (tenkan[i] + kijun[i]) / 2;
+      b[i + 26] = mid(i, 52);
+    });
+    draw.ichi = { a, b };
+    const line = (xs) => xs.map((v, i) => (v == null ? null : { time: at(i), value: v })).filter(Boolean);
+    tenkanSeries.setData(line(tenkan));
+    kijunSeries.setData(line(kijun));
+    chikouSeries.setData(closes.slice(26).map((v, i) => ({ time: at(i), value: v })));
+  } else {
+    draw.ichi = null;
+    [tenkanSeries, kijunSeries, chikouSeries].forEach((x) => x.setData([]));
   }
 }
 
@@ -230,29 +515,44 @@ function renderSide() {
   renderMarkers();
 }
 
-// 지금 포지션(가상 계좌)과 근거: 일봉 규칙이 마지막 종가에서 본 값, 장중 갈래의 마지막 판단과 오늘의 경계
+// 지금 포지션(가상 계좌)과 근거: 갈래마다 조건 체크리스트(✓ 충족, ✗ 불충족, • 참고)와 그 갈래의 결론, 합친 결과, 다음 판단 시각
+const sideText = (n) => (n > 0 ? `<span class="c-up">롱 ${n}</span>` : n < 0 ? `<span class="c-down">숏 ${-n}</span>` : '없음');
+const whyItem = ([k, v, ok]) => `<li class="${ok === true ? 'ok' : ok === false ? 'no' : ''}"><i aria-hidden="true">${ok === true ? '✓' : ok === false ? '✗' : '•'}</i>`
+  + `<b>${k}</b><span>${v}</span></li>`;
+const whyBlock = (title, result, items) => `<div class="why-block"><div class="why-title"><span>${title}</span>${result == null ? '' : `<span>${result}</span>`}</div>`
+  + `<ul class="why-list">${items.map(whyItem).join('')}</ul></div>`;
+
 function renderWhy(c, d) {
   const price = state.quote ? state.quote.price : null;
   const pnl = c.contracts && c.entry && price ? c.contracts * d.multiplier * (price - c.entry) : 0;
   const r = c.equity / d.capital - 1;
   $('why-note').textContent = c.key === d.live ? '★ 대회 매매법' : '가상 계좌로만 지켜봄';
-  const list = c.explain.map(([k, v]) => [k, v]);
+  let body;
   if (c.noise) {
+    const parts = c.parts || {};
     const last = c.trades.find((t) => t.sleeve === 'intraday');
     const n = c.noise;
     const hour = Math.min(15, Math.max(10, nyHour() + 1));
-    list.push(['장중 갈래', last ? `${fmtTime(last.time)} ${last.why}` : '아직 판단 없음']);
-    list.push([n.today ? '오늘 경계' : `${n.date.slice(5)} 경계`, n.bands[hour]
-      ? `9시 시가 ${fmtPrice(n.open)} → ${hour}시에 <span class="c-up">${fmtPrice(n.bands[hour][0])}</span> 위면 롱, <span class="c-down">${fmtPrice(n.bands[hour][1])}</span> 아래면 숏`
-      : '-']);
-    if (c.parts) list.push(['합치기', `${partsText(c.parts)} → 최대 1계약`]);
+    const band = n.bands[hour];
+    body = whyBlock('일봉 갈래 · 되돌림 + 추세', sideText(parts.daily || 0), c.explain)
+      + whyBlock('장중 갈래 · 노이즈 돌파', sideText(parts.intraday || 0), [
+        ['마지막 판단', last ? `${fmtTime(last.time)} · ${last.why}` : '아직 없음', null],
+        [`${hour}시 경계`, band ? `<span class="c-up">${fmtPrice(band[0])}</span> 위 → 롱 · <span class="c-down">${fmtPrice(band[1])}</span> 아래 → 숏`
+          + (n.today ? '' : ` <small>(${n.date.slice(5)} 기준)</small>`) : '-', null],
+        ['기준', `그날 뉴욕 9시 시가 ${fmtPrice(n.open)} · 16시 정리`, null],
+      ])
+      + `<p class="why-sum">일봉 ${sideText(parts.daily || 0)} + 장중 ${sideText(parts.intraday || 0)} → <b>${position(c.contracts)}</b> <small>(최대 1계약)</small></p>`;
+  } else {
+    // 마지막 판단(가상 계좌의 마지막 매매 까닭)이 있으면 조건 위에
+    const last = c.trades.find((t) => t.why);
+    body = whyBlock('조건', null, (last && (c.scalp || c.hourly) ? [['마지막 판단', `${fmtTime(last.time)} · ${last.why}`, null]] : []).concat(c.explain));
   }
-  list.push(['다음 판단', c.scalp ? '평일 뉴욕 9:30 ~ 16시, 1분봉이 마감될 때마다' : `${c.next_intraday ? `장중 ${fmtTime(c.next_intraday)} · ` : ''}일봉 ${fmtTime(d.next_decision)}`]);
+  const next = c.scalp ? '평일 뉴욕 9:30 ~ 16시, 1분봉 마감마다' : c.hourly ? '매시 정각(1시간봉 마감마다, CME 쉬는 때 제외)' : `${c.next_intraday ? `장중 ${fmtTime(c.next_intraday)} · ` : ''}일봉 ${fmtTime(d.next_decision)}`;
   $('why').innerHTML = `<div class="why-head"><span class="pos-big">${position(c.contracts)}</span><span class="why-acct">`
     + (c.contracts && c.entry ? `진입 ${fmtPrice(c.entry)} · <b class="${tone(pnl)}">${fmtMoney(pnl)}</b><br>` : '')
     + `가상 계좌 <b class="${tone(r)}">${fmtSigned(r)}</b></span></div>`
-    + rows(list) + (d.error ? `<div class="note warn">${d.error}</div>` : '')
-    + '<p class="why-foot">근거의 값은 나스닥100 지수 기준이고, 차트의 선들은 MNQ 선물로 계산해 수준이 조금 다릅니다.</p>';
+    + body + `<p class="why-next">다음 판단 <b>${next}</b></p>` + (d.error ? `<div class="note warn">${d.error}</div>` : '')
+    + '<p class="why-foot">일봉 조건의 값은 나스닥100 지수 기준이고, 차트의 선들은 MNQ 선물로 계산해 수준이 조금 다릅니다.</p>';
 }
 
 function renderQuote() {
@@ -390,6 +690,10 @@ async function tickTrading() {
   try {
     if (!state.signals) state.signals = await api('/api/signals');
     if (!state.replay) state.replay = await api('/api/replay');
+    if (!state.dailyCloses || Date.now() - state.dailyAt > 600000) {  // 일봉 종가는 10분마다
+      state.dailyAt = Date.now();
+      api('/api/chart?interval=D').then((d) => { state.dailyCloses = d.bars.map((b) => b.close); renderLevels(); }).catch(() => {});
+    }
     api('/api/live').then(renderLive).catch(() => {});
     state.trading = await api('/api/trading');
     renderSide();
@@ -441,6 +745,7 @@ $('picks').addEventListener('click', (ev) => {
 })();
 
 document.addEventListener('themechange', () => renderMarkers());
+renderTools();
 chooseInterval(state.interval);
 tickTrading();
 tickAccount();

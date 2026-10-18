@@ -110,9 +110,9 @@ def _intraday_side(ny, k):
 
 
 def _hour_frame():
-    """LS 1시간봉 약 3주(지난 14일 + 오늘): 뉴욕 시각(봉 시작) 색인, open·close."""
+    """LS 1시간봉 약 3주(지난 14일 + 오늘): 뉴욕 시각(봉 시작) 색인, open·high·low·close."""
     rows = ls.minute_bars(status["symbol"], 60, 500)
-    return pd.DataFrame({"open": [float(r["open"]) for r in rows], "close": [float(r["close"]) for r in rows]},
+    return pd.DataFrame({k: [float(r[k]) for r in rows] for k in ("open", "high", "low", "close")},
                         index=pd.to_datetime([r["t"] for r in rows], unit="s", utc=True).tz_convert(NY).tz_localize(None))
 
 
@@ -160,6 +160,23 @@ def _intraday(key, acct, ny, price, now):
     if n != held:
         why = "9시 시가 대비 위로 노이즈 밖 → 롱" if side > 0 else "9시 시가 대비 아래로 노이즈 밖 → 숏" if side < 0 else "노이즈 안 → 쉼"
         _set(key, acct, "intraday", n, price, now, {"date": f"{ny:%Y-%m-%d}", "expo": side * cand["lever"], "why": f"{ny.hour}시 판단: {why}"})
+
+
+def _ichimoku(key, acct, ny, price, now):
+    """일목 구름 반전 갈래(관찰용): 매시 정각 뒤 10분 안에, 마감된 LS 1시간봉으로 과거 시험과 같은 strategies.ichimoku를 돌려 방향을 따른다."""
+    stamp = f"{ny:%Y-%m-%d %H}"
+    wd, hour = ny.weekday(), ny.hour
+    closed = wd == 5 or (wd == 6 and hour < 18) or (wd == 4 and hour >= 17) or hour == 17  # CME가 쉬는 동안은 새 봉이 없다
+    if acct.get("ichimoku_at") == stamp or ny.minute >= 10 or closed:
+        return
+    acct["ichimoku_at"] = stamp
+    frame = _hour_frame()
+    frame = frame[frame.index + pd.Timedelta(hours=1) <= ny.replace(tzinfo=None)]  # 마감된 봉만
+    k = strategies.ichimoku(frame).iloc[-1]
+    held, want = acct.get("parts", {}).get("ichimoku", 0), int(k.side)
+    if want and want != held:
+        why = f"구름 반전: A {k.a:,.2f} {'>' if want > 0 else '<'} B {k.b:,.2f} → {'롱' if want > 0 else '숏'}"
+        _set(key, acct, "ichimoku", want, price, now, {"date": f"{ny:%Y-%m-%d}", "expo": float(want), "why": why})
 
 
 def _minute_frame():
@@ -220,6 +237,11 @@ def tick():
                     _scalp(key, acct, ny, price, now)
                 except Exception:
                     log.exception("스캘핑 판단 실패(%s)", key)
+            if config.CANDIDATES[key].get("ichimoku"):
+                try:
+                    _ichimoku(key, acct, ny, price, now)
+                except Exception:
+                    log.exception("일목 판단 실패(%s)", key)
             if acct["decided"] != ny.strftime("%Y-%m-%d"):
                 if px is None:
                     px = strategies.history()
@@ -293,7 +315,7 @@ def get_trading():
                 noise = bands(cand["intraday"]["k"])
             except Exception as e:  # 설명용이라 실패해도 화면은 그대로
                 log.warning("장중 경계 계산 실패: %s", e)
-        out.append({"key": key, "name": cand["name"], "rule": cand["rule"], "scalp": "scalp" in cand, "equity": equity, "contracts": acct.get("contracts", 0), "entry": acct.get("entry"),
+        out.append({"key": key, "name": cand["name"], "rule": cand["rule"], "scalp": "scalp" in cand, "hourly": bool(cand.get("ichimoku")), "equity": equity, "contracts": acct.get("contracts", 0), "entry": acct.get("entry"),
                     "parts": acct.get("parts"), "next_intraday": _next_intraday() if "intraday" in cand else None,
                     "started": acct.get("started"), "trades": acct.get("trades", [])[::-1][:50], "explain": bt["explain"][key], "noise": noise,
                     "signal": {"expo": bt["signal"][key], "contracts": _contracts(bt["signal"][key], equity, price) if price else None}})

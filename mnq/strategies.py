@@ -32,28 +32,34 @@ RULES = {
 
 
 def explain(key, px):
-    """화면의 '추천 근거': 그 후보의 일봉 규칙이 마지막 종가에서 본 값들 [(항목, 설명)]. 값은 나스닥100 지수(^NDX) 기준."""
+    """화면의 '추천 근거': 그 후보의 일봉 규칙이 마지막 종가에서 본 조건들 [(항목, 설명, 충족 True / 불충족 False / 참고 None)].
+    값은 나스닥100 지수(^NDX) 기준."""
     rule, c = config.CANDIDATES[key]["rule"], float(px.iloc[-1])
     sma = float(px.rolling(200).mean().iloc[-1])
-    trend = ("200일선", f"종가 {c:,.0f} / 200일선 {sma:,.0f} ({c / sma - 1:+.1%}) → " + ("위라 상승장(조건 충족)" if c > sma else "아래라 쉰다"))
+    trend = ("상승장", f"종가 {c:,.0f} {'>' if c > sma else '≤'} 200일선 {sma:,.0f} ({c / sma - 1:+.1%})", bool(c > sma))
+    if config.CANDIDATES[key].get("ichimoku"):
+        return [("롱", "구름이 초록으로 바뀜: 선행스팬 A(전환 9·기준 26 평균) > B(52봉 가운데)", None),
+                ("숏", "구름이 빨강으로 바뀜: A < B. 늘 1계약, 반전 때 롱·숏을 뒤집는다", None),
+                ("연구 결과", "2년 1시간봉: 샤프 0.04 ~ 0.21, 4주 수익+MDD가 섞기보다 나쁨 → 관찰용", False)]
     if rule == "flat":
         sc = config.CANDIDATES[key]["scalp"]
-        return [("규칙", f"뉴욕 9:30 ~ 16시, 1분봉 종가가 직전 {sc['look']}분 고가 위면 롱 · 저가 아래면 숏. 다음 봉 시가에 들고 "
-                       f"익절 {sc['tp']:g}포인트, 손절 {sc['sl']:g}포인트, 최대 {sc['hold']}분"),
-                ("연구 결과", "r5: 비용 뒤 승률 93%였지만 1회 평균 -1.4포인트(앞쪽), 뒤쪽 -2.7포인트. 자주 조금 벌고 가끔 크게 잃는다 → 관찰용")]
+        return [("진입", f"1분봉 종가가 직전 {sc['look']}분 고가 위 → 롱, 저가 아래 → 숏 (뉴욕 9:30 ~ 16시)", None),
+                ("청산", f"+{sc['tp']:g}포인트 익절 · -{sc['sl']:g}포인트 손절 · {sc['hold']}분 경과", None),
+                ("연구 결과", "승률 93%지만 1회 평균 -1.4 ~ -2.7포인트(비용 뒤) → 관찰용", False)]
     if rule == "ibs_trend":
         d = pd.read_pickle(config.STORE / "data" / "NDX_1d.pkl").reindex(px.index).iloc[-1]
         v = (c - d["Low"]) / (d["High"] - d["Low"])
-        return [trend, ("IBS", f"(종가 - 저가) ÷ (고가 - 저가) = {v:.3f} → " + ("0.15 미만, 범위 바닥 마감이라 다음 하루 롱" if v < 0.15 else "0.15 이상이라 신호 없음"))]
+        return [trend, ("바닥 마감", f"IBS {v:.3f} " + ("< 0.15: 그날 범위의 아래 15%에서 마감" if v < 0.15 else "≥ 0.15: 범위 바닥 마감이 아님"), bool(v < 0.15)),
+                ("보유", "신호 다음 하루만", None)]
     # dip_trend: 5일 중 최저로 마감한 날부터 5일 동안 롱(그 사이 200일선 위일 때만)
     hits = px[px <= px.rolling(5).min()]
     last = hits.index[-1]
     ago = len(px.loc[last:]) - 1  # 마지막 신호가 몇 거래일 전인가
     again = float(px.iloc[-4:].min())
-    out = [trend, ("5일 최저 마감", f"{last:%m-%d} 종가 {hits.iloc[-1]:,.0f}" + (" (마지막 종가)" if ago == 0 else f" ({ago}거래일 전)"))]
+    out = [trend, ("눌림목", f"{last:%m-%d} 종가({hits.iloc[-1]:,.0f})가 5일 최저" + (" (마지막 종가)" if ago == 0 else f" ({ago}거래일 전)"), bool(ago < 5))]
     if ago < 5:
-        out.append(("롱 기간", f"신호 뒤 5거래일. 새 최저가 없으면 {5 - ago}거래일 뒤 종가 결정에서 정리"))
-    out.append(("다시 신호", f"다음 종가가 {again:,.0f} 이하면 5일 최저 → 롱을 5일 연장"))
+        out.append(("유지", f"새 5일 최저가 없으면 {5 - ago}거래일 뒤 정리", None))
+    out.append(("연장", f"다음 종가 ≤ {again:,.0f}이면 5일 더", None))
     return out
 
 
@@ -230,6 +236,8 @@ def replay(key, px):
     cand = config.CANDIDATES[key]
     if "scalp" in cand:
         return _scalp_events(key)
+    if cand.get("ichimoku"):
+        return _ichimoku_events()
     h = hourly()
     at = h["close"].copy()
     at.index = at.index + pd.Timedelta(hours=1)  # 그 정시의 가격 = 직전 봉 종가
@@ -302,6 +310,28 @@ def scalp_trades(frame, look=30, tp=2.0, sl=25.0, hold=60, since=None):
     return out
 
 
+# ---------- 일목 구름 반전(관찰용): research/r15_ichimoku.py ----------
+def ichimoku(frame):
+    """1시간봉(high·low) → 봉마다 선행스팬 A·B(26봉 앞으로 밀기 전, 오른쪽 끝에 그려지는 미래 구름의 값)와 그 봉 마감 뒤 들 방향 side.
+    A가 위면 +1(롱), 아래면 -1(숏), 계산 전(52봉 미만)은 0. 구름 색이 바뀌는 봉에서 롱·숏이 뒤집힌다."""
+    mid = lambda n: (frame["high"].rolling(n).max() + frame["low"].rolling(n).min()) / 2
+    a, b = (mid(9) + mid(26)) / 2, mid(52)
+    return pd.DataFrame({"a": a, "b": b, "side": np.sign(a - b).fillna(0.0)})
+
+
+def _ichimoku_events():
+    """일목 구름 반전 과거 시험(NQ=F 1시간봉)의 계약 수 변화(1계약, 차트 화살표용). 시각은 봉이 마감된 때."""
+    h = hourly()
+    k = ichimoku(h)
+    out, held = [], 0
+    for t, row in k.iterrows():
+        if row.side and row.side != held:
+            out.append({"time": int((t + pd.Timedelta(hours=1)).tz_localize("America/New_York").timestamp()), "from": held, "to": int(row.side),
+                        "price": float(h.at[t, "close"]), "sleeve": "ichimoku", "why": "구름 반전 → " + ("롱" if row.side > 0 else "숏")})
+            held = int(row.side)
+    return _with_pnl(out)
+
+
 def minute_history():
     """스캘핑 과거 시험용 LS MNQ 1분봉(research/fetch_1m.py로 받은 것, 뉴욕 시각). 근월물이 되기 전 거래가 적던 날은 뺀다(r5와 같게)."""
     import glob
@@ -338,6 +368,15 @@ def backtest(key, px):
         periods = {f"1분봉 {pnl.index[0]:%Y-%m-%d} ~": (None, None)}
         note = (f"LS MNQ 1분봉 {len(pnl)}일, 매매 {len(pts)}번: 승률(비용 전) {(pts > 0).mean():.0%}, 1회 평균 {pts.mean():+.2f}포인트(비용 전). "
                 "기간이 아주 짧아 근거가 약하다")
+    elif cand.get("ichimoku"):
+        h = hourly()
+        pos = ichimoku(h)["side"]
+        cash = (pos.shift(1).fillna(0.0) * h["close"].diff().fillna(0.0) * config.MULTIPLIER
+                - config.FEE_PER_CONTRACT * pos.diff().abs().fillna(0.0)) / config.CAPITAL  # 1계약, 사고팔 때마다 비용
+        pnl = cash.groupby(cash.index.normalize()).sum()
+        pnl = pnl[pnl.index.dayofweek < 5]
+        periods = {f"1시간봉 {pnl.index[0]:%Y-%m} ~": (None, None)}
+        note = f"나스닥100 선물(NQ=F) 1시간봉 {pnl.index[0]:%Y-%m-%d} ~, 1계약. 표준값 9·26·52 그대로(고른 파라미터 없음)"
     elif "intraday" in cand:
         hp = mix_pnl(key, px)
         pnl = hp.groupby(hp.index.normalize()).sum()
