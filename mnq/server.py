@@ -54,6 +54,11 @@ def api_signals():
     return jsonify(chart.signals())
 
 
+@app.get("/api/replay")
+def api_replay():
+    return jsonify(chart.replay())
+
+
 @app.get("/api/live")
 def api_live():
     return jsonify(live.get_live())

@@ -23,11 +23,18 @@ def _dip(px):
     return (px <= px.rolling(5).min()).astype(float).rolling(5).max()  # 5일 중 최저로 마감하면 5일 동안 롱
 
 
+def _ibs(px, x=0.15):
+    """종가가 그날 범위의 아래 x 안에서 끝나면 다음 하루 롱(research/r14_ideas.py). 고가·저가는 history()가 받아 둔 같은 파일에서."""
+    d = pd.read_pickle(config.STORE / "data" / "NDX_1d.pkl").reindex(px.index)
+    return ((px - d["Low"]) / (d["High"] - d["Low"]).replace(0, np.nan) < x).astype(float)
+
+
 RULES = {
     "hold": lambda px: pd.Series(1.0, index=px.index),
     "vt": _vt,
     "trend_vt": lambda px: (px > px.rolling(200).mean()) * _vt(px),
     "dip_trend": lambda px: _dip(px) * (px > px.rolling(200).mean()),
+    "ibs_trend": lambda px: _ibs(px) * (px > px.rolling(200).mean()),
 }
 
 
@@ -176,7 +183,63 @@ def signals(key, px, since="2021-01-01"):
         if n != held:
             out.append({"time": int(day.timestamp()), "from": int(held), "to": int(n), "price": float(px[day])})
             held = int(n)
-    return out
+    return _with_pnl(out)
+
+
+def _with_pnl(events):
+    """계약 수 변화 목록에 평균 진입가를 따라가며, 줄이거나 정리할 때의 손익(달러, 비용 전)을 pnl로 붙인다."""
+    entry = None
+    for e in events:
+        held, want, price = e["from"], e["to"], e["price"]
+        closed = abs(held) if want == 0 or (held > 0) != (want > 0) else max(abs(held) - abs(want), 0)
+        if held and closed:
+            e["pnl"] = round((price - entry) * (1 if held > 0 else -1) * closed * config.MULTIPLIER, 2)
+        if want == 0:
+            entry = None
+        elif held == 0 or (held > 0) != (want > 0):
+            entry = price
+        elif abs(want) > abs(held):
+            entry = (entry * abs(held) + price * (abs(want) - abs(held))) / abs(want)
+    return events
+
+
+def replay(key, px):
+    """분봉 차트용: 그 후보를 NQ=F 1시간봉(최근 2년) 위에서 가상 계좌처럼 돌린 계약 수 변화 [{time, from, to, price, sleeve, why, pnl?}].
+
+    일봉 갈래는 그날 뉴욕 16:10에, 장중 갈래는 10 ~ 15시 정시에 정하고 16시에 정리한다(mnq/paper.py와 같은 순서·같은 상한).
+    계좌는 늘 시작 금액으로 보고, 가격은 그 시각 직전 1시간봉의 종가다."""
+    cand = config.CANDIDATES[key]
+    h = hourly()
+    at = h["close"].copy()
+    at.index = at.index + pd.Timedelta(hours=1)  # 그 정시의 가격 = 직전 봉 종가
+    size = lambda lever, price: int(round(lever * config.CAPITAL / (price * config.MULTIPLIER)))
+    plan = []  # (뉴욕 시각, 갈래, 그 갈래의 계약 수 또는 방향, 까닭)
+    expo = exposure(key, px)[h.index[0].normalize():]
+    for day, e in expo.items():
+        plan.append((day + pd.Timedelta(hours=16, minutes=10), "daily", e * cand["lever"], f"종가 {px[day]:,.2f} → 노출 {e * cand['lever']:.2f}배"))
+    if "intraday" in cand:
+        sides = noise_sides(moves(h), cand["intraday"]["k"])
+        for day, row in sides.iterrows():
+            for hour, side in row.dropna().items():
+                why = "노이즈 위로 → 롱" if side > 0 else "노이즈 아래로 → 숏" if side < 0 else "노이즈 안 → 쉼"
+                plan.append((day + pd.Timedelta(hours=hour), "intraday", side, f"{hour}시 판단: {why}"))
+            plan.append((day + pd.Timedelta(hours=16), "intraday", 0.0, "16시 정리"))
+    plan.sort(key=lambda p: (p[0], p[1] == "daily"))  # 16:00 정리가 16:10 일봉 결정보다 먼저
+    parts, held, out = {}, 0, []
+    cap = cand.get("max_contracts")
+    for t, sleeve, v, why in plan:
+        i = at.index.searchsorted(t, side="right") - 1
+        if i < 0 or t - at.index[i] > pd.Timedelta(hours=2):
+            continue  # 그 시각 시세가 없다(쉬는 날)
+        price = float(at.iloc[i])
+        parts[sleeve] = size(v, price) if sleeve == "daily" else int(v) * size(cand["intraday"]["lever"], price)
+        want = sum(parts.values())
+        if cap:
+            want = max(-cap, min(cap, want))
+        if want != held:
+            out.append({"time": int(t.tz_localize("America/New_York").timestamp()), "from": held, "to": want, "price": price, "sleeve": sleeve, "why": why})
+            held = want
+    return _with_pnl(out)
 
 
 def backtest(key, px):

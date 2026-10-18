@@ -1,5 +1,6 @@
 // 실시간 차트 페이지: MNQ 근월물 봉을 0.5초마다 이어 그린다(서버가 LS 실시간 체결로 마지막 봉을 고친다).
-// 분봉에는 고른 후보의 가상 매매를, 일봉(2021 ~)에는 그 후보의 규칙이 롱을 들고 정리한 자리를 화살표로 표시한다.
+// 분봉에는 고른 후보를 최근 2년 1시간봉으로 돌린 롱·숏 진입·청산(과거 시험)과 가상 매매를, 일봉(2021 ~)에는 규칙의 진입·청산을 화살표로 표시한다.
+// 청산하거나 줄인 화살표에는 그 몫의 손익(비용 전)을 붙인다.
 // 오른쪽 칸에는 그 후보의 포지션, 다음 자동매매, 시세, 매매 기록을 보여 준다.
 
 const $ = (id) => document.getElementById(id);
@@ -25,6 +26,7 @@ const state = {
   quote: null,
   trading: null,
   signals: null,     // 후보마다 2021년부터 규칙대로 계약 수를 바꾼 날들(일봉에 표시)
+  replay: null,      // 후보마다 최근 2년 1시간봉으로 돌린 계약 수 변화(분봉에 표시)
   generation: 0,     // 봉 단위를 바꿀 때마다 늘린다. 늦게 온 이전 응답을 버리는 용도
   loadingOlder: false,
   noOlder: false,    // 더 과거의 봉이 서버(LS)에 없다
@@ -122,11 +124,13 @@ chart.subscribeCrosshairMove((p) => {
 // ---------- 자동매매 표시 ----------
 const current = () => state.trading && (state.trading.candidates.find((c) => c.key === state.candidate) || state.trading.candidates[state.trading.candidates.length - 1]);
 
-// 계약 수 변화 하나를 화살표 하나로: 새로 들면 "롱 진입 4", 다 정리하면 "청산", 그 밖에는 늘리거나 줄인 계약 수
-function marker(time, from, to, long) {
+// 계약 수 변화 하나를 화살표 하나로: 새로 들면 "롱 진입 4", 다 정리하면 "롱 청산 +$120", 그 밖에는 늘리거나 줄인 계약 수
+function marker(time, from, to, long, pnl) {
   const buy = to > from;
-  const text = from === 0 ? `${to > 0 ? '롱' : '숏'} 진입 ${Math.abs(to)}` : to === 0 ? '청산'
-    : (from > 0) !== (to > 0) ? `${to > 0 ? '롱' : '숏'} 전환 ${Math.abs(to)}` : `${buy ? '+' : '−'}${Math.abs(to - from)}${long ? ` → ${Math.abs(to)}` : ''}`;
+  const side = (n) => (n > 0 ? '롱' : '숏');
+  const text = (from === 0 ? `${side(to)} 진입 ${Math.abs(to)}` : to === 0 ? `${side(from)} 청산`
+    : (from > 0) !== (to > 0) ? `${side(to)} 전환 ${Math.abs(to)}` : `${buy ? '+' : '−'}${Math.abs(to - from)}${long ? ` → ${Math.abs(to)}` : ''}`)
+    + (pnl == null ? '' : ` ${pnl < 0 ? '−' : '+'}$${Math.abs(Math.round(pnl)).toLocaleString('en-US')}`);
   return { time, position: buy ? 'belowBar' : 'aboveBar', shape: buy ? 'arrowUp' : 'arrowDown', color: buy ? UP : DOWN, text };
 }
 
@@ -142,10 +146,14 @@ function renderMarkers() {
       const day = Date.parse(t.date) / 1000;  // 그날 0시(UTC): 일봉의 시각과 같다
       days.set(day, { time: day, from: t.from, to: t.to });
     });
-    markers = [...days.values()].map((s) => marker(s.time + TZ, s.from, s.to, false));
+    markers = [...days.values()].map((s) => marker(s.time + TZ, s.from, s.to, false, s.pnl));
   } else {
+    // 분봉: 가상 계좌를 시작하기 전은 과거 시험(1시간봉으로 돌린 것), 그 뒤는 가상 계좌의 실제 매매
     const step = state.interval * 60;
-    markers = c.trades.filter((t) => t.to !== t.from && t.time >= first).map((t) => marker(Math.floor(t.time / step) * step + TZ, t.from, t.to, true));
+    const until = c.started || Infinity;
+    const past = ((state.replay || {})[c.key] || []).filter((t) => t.time < until);
+    markers = past.concat(c.trades).filter((t) => t.to !== t.from && t.time >= first)
+      .map((t) => marker(Math.floor(t.time / step) * step + TZ, t.from, t.to, true, t.pnl));
   }
   series.setMarkers(markers.sort((a, b) => a.time - b.time));
   if (entryLine) series.removePriceLine(entryLine);
@@ -250,6 +258,7 @@ function renderLive(d) {
 async function tickTrading() {
   try {
     if (!state.signals) state.signals = await api('/api/signals');
+    if (!state.replay) state.replay = await api('/api/replay');
     api('/api/live').then(renderLive).catch(() => {});
     state.trading = await api('/api/trading');
     renderSide();

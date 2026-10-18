@@ -151,6 +151,17 @@ def signals():
     return _signals["data"]
 
 
+_replay = {"at": 0, "data": None}
+
+
+def replay():
+    """후보마다 최근 2년 1시간봉 위에서 가상 계좌처럼 돌린 계약 수 변화(분봉 차트에 롱·숏 진입·청산을 그리는 용도). 6시간마다 새로."""
+    if not _replay["data"] or time.time() - _replay["at"] > 6 * 3600:
+        px = strategies.history()
+        _replay.update(at=time.time(), data={key: strategies.replay(key, px) for key in config.CANDIDATES})
+    return _replay["data"]
+
+
 def get_chart(key, since=None):
     return {"interval": key, "bars": bars(key, since), "quote": quote()}
 
