@@ -18,7 +18,8 @@ const OUTLOOK = {
   0: ['― 중립', 'wait', '긍정과 부정이 비슷하거나 서로 엇갈려 뚜렷한 방향이 없습니다.'],
 };
 const FILTERS = [['all', '전체'], ['foreign', '해외'], ['domestic', '국내'], ['community', '커뮤니티'], ['positive', '긍정'], ['negative', '부정']];
-const state = { data: null, filter: 'all' };
+const PAGE = 5;  // 최신 글은 5개씩 쪽으로 나눈다
+const state = { data: null, filter: 'all', page: 0 };
 
 async function api(path) {
   const res = await fetch(path);
@@ -45,13 +46,18 @@ function renderOutlook() {
     ${o.notes.map((n) => `<div class="note warn">⚠ ${n}</div>`).join('')}`;
 }
 
-// 최근 값 선 그래프. lo·hi가 있으면 그 범위(공포·탐욕 0 ~ 100), 없으면 값의 범위로
-function sparkline(values, label, lo, hi) {
-  const w = 220, h = 44, a = lo ?? Math.min(...values), b = hi ?? Math.max(...values), span = b - a || 1;
+// 최근 값 선 그래프와 축: 왼쪽 y축 눈금(lo·hi가 있으면 그 범위, 공포·탐욕 0 ~ 100), 아래 x축 날짜(times가 있을 때). 선은 칸 너비에 맞춰 늘어난다
+function sparkline(values, label, lo, hi, times, digits = 0) {
+  const w = 220, h = 60, a = lo ?? Math.floor(Math.min(...values)), b = hi ?? Math.ceil(Math.max(...values)), span = b - a || 1;
   const xs = values.map((_, i) => (i / (values.length - 1)) * w), ys = values.map((v) => h - ((v - a) / span) * h);
-  const mid = lo != null ? `<line x1="0" x2="${w}" y1="${h / 2}" y2="${h / 2}" class="mid"/>` : '';
-  return `<svg viewBox="0 0 ${w} ${h}" class="spark" preserveAspectRatio="none" role="img" aria-label="${label}">${mid}
-    <polyline points="${xs.map((x, i) => `${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ')}"/><circle cx="${xs[xs.length - 1]}" cy="${ys[ys.length - 1]}" r="3"/></svg>`;
+  const yTicks = [b, (a + b) / 2, a], xTicks = [0, 1, 2, 3].map((k) => Math.round((k / 3) * (values.length - 1)));
+  const grid = yTicks.map((v) => `<line x1="0" x2="${w}" y1="${h - ((v - a) / span) * h}" y2="${h - ((v - a) / span) * h}" class="grid"/>`).join('')
+    + xTicks.map((i) => `<line x1="${xs[i]}" x2="${xs[i]}" y1="0" y2="${h}" class="grid"/>`).join('');
+  const day = (t) => { const d = new Date(t * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; };
+  return `<div class="spark-box"><div class="spark-y">${yTicks.map((v) => `<span>${v.toFixed(digits)}</span>`).join('')}</div>
+    <svg viewBox="0 0 ${w} ${h}" class="spark" preserveAspectRatio="none" role="img" aria-label="${label}">${grid}
+    <polyline points="${xs.map((x, i) => `${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ')}"/></svg>
+    ${times ? `<div class="spark-x">${xTicks.map((i) => `<span>${day(times[i])}</span>`).join('')}</div>` : ''}</div>`;
 }
 
 function renderTiles() {
@@ -59,7 +65,7 @@ function renderTiles() {
   const fg = d.fear_greed;
   if (fg) {
     tiles.push(`<div class="tile"><span>CNN 공포·탐욕 지수 <small>0 공포 ~ 100 탐욕</small></span>
-      <b class="${tone(fg.value - 50)}">${fg.value} <em>${fg.rating}</em></b>${sparkline(fg.history.map((p) => p.value), '최근 30일 공포·탐욕 지수', 0, 100)}
+      <b class="${tone(fg.value - 50)}">${fg.value} <em>${fg.rating}</em></b>${sparkline(fg.history.map((p) => p.value), '최근 30일 공포·탐욕 지수', 0, 100, fg.history.map((p) => p.time))}
       <small>일주일 전 ${fg.week_ago} · 한 달 전 ${fg.month_ago} → 지금 ${fg.value}</small></div>`);
   } else {
     tiles.push('<div class="tile"><span>CNN 공포·탐욕 지수</span><b>-</b><small>CNN에서 받지 못했습니다.</small></div>');
@@ -70,7 +76,7 @@ function renderTiles() {
     if (!v) return `<div class="tile"><span>${title}</span><b>-</b><small>야후에서 받지 못했습니다.</small></div>`;
     const chg = v.value - v.prev, level = v.value >= 30 ? '높음(불안)' : v.value >= 20 ? '보통 이상' : '낮음(안정)';
     return `<div class="tile"><span>${title} <small>${sub}</small></span>
-      <b>${v.value.toFixed(2)} <em><span class="${tone(-chg)}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}</span></em></b>${sparkline(v.history, `${title} 최근 30일`)}
+      <b>${v.value.toFixed(2)} <em><span class="${tone(-chg)}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}</span></em></b>${sparkline(v.history, `${title} 최근 30거래일`, null, null, v.times, 1)}
       <small>${level} · 최근 석 달 평균 ${v.avg.toFixed(1)} · 하루 변동폭 ≈ 지수 ${(v.value / Math.sqrt(252)).toFixed(1)}%</small></div>`;
   };
   tiles.push(vol('vxn', 'VXN', '나스닥 100 공포지수'), vol('vix', 'VIX', 'S&P 500 공포지수'));
@@ -96,14 +102,19 @@ function renderItems() {
   const d = state.data;
   $('filters').innerHTML = FILTERS.map(([key, label]) => `<button data-key="${key}" class="${key === state.filter ? 'active' : ''}" aria-pressed="${key === state.filter}">${label}</button>`).join('');
   const match = { all: () => true, positive: (i) => i.sentiment > 0, negative: (i) => i.sentiment < 0 }[state.filter] || ((i) => i.group === state.filter);
-  const items = d.items.filter(match), now = Date.now() / 1000;
-  $('items').innerHTML = items.length ? items.map((i) => {
+  const items = d.items.filter(match), now = Date.now() / 1000, pages = Math.max(1, Math.ceil(items.length / PAGE));
+  state.page = Math.min(state.page, pages - 1);
+  $('items').innerHTML = items.length ? items.slice(state.page * PAGE, state.page * PAGE + PAGE).map((i) => {
     const [label, cls] = SENTIMENT[i.sentiment];
     const words = [...i.words.positive.map((w) => `<span class="c-up">${escapeHtml(w)}</span>`), ...i.words.negative.map((w) => `<span class="c-down">${escapeHtml(w)}</span>`)].join(' ');
     const link = /^https?:\/\//.test(i.link) ? escapeHtml(i.link) : '#';
     return `<a class="news-item" href="${link}" target="_blank" rel="noopener noreferrer"><b class="chip ${cls}">${label}</b>
       <span class="news-title">${escapeHtml(i.title)}</span><small>${escapeHtml(i.source)} · ${fmtAgo(now - i.time)}${words ? ' · ' + words : ''}</small></a>`;
   }).join('') : '해당하는 글이 없습니다.';
+  $('pager').hidden = pages < 2;
+  $('pager').innerHTML = `<button type="button" class="plain-button" data-go="-1"${state.page ? '' : ' disabled'}>← 최신</button>`
+    + `<span>${state.page + 1} / ${pages} 쪽 · ${items.length}건</span>`
+    + `<button type="button" class="plain-button" data-go="1"${state.page < pages - 1 ? '' : ' disabled'}>이전 →</button>`;
 }
 
 async function load() {
@@ -124,6 +135,13 @@ async function load() {
 $('filters').addEventListener('click', (ev) => {
   if (!ev.target.dataset.key) return;
   state.filter = ev.target.dataset.key;
+  state.page = 0;
+  renderItems();
+});
+$('pager').addEventListener('click', (ev) => {
+  const go = Number(ev.target.dataset.go);
+  if (!go) return;
+  state.page += go;
   renderItems();
 });
 $('refresh').addEventListener('click', load);

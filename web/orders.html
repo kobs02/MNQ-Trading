@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/wanteddev/wanted-sans@v1.0.3/packages/wanted-sans/fonts/webfonts/variable/split/WantedSansVariable.min.css">
   <link rel="stylesheet" href="style.css">
   <script>document.documentElement.dataset.theme = localStorage.getItem("theme") === "light" ? "light" : "dark";</script>
+  <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body class="news-page">
   <a class="skip-link" href="#content">본문으로 건너뛰기</a>
@@ -32,6 +33,11 @@
       <div id="summary" class="stats order-stats"></div>
     </section>
     <section class="card">
+      <h2>매매 차트 <small id="trade-chart-note">첫 체결부터 마지막 체결까지 · ▲ 매수 · ▼ 매도 · 한국 시각</small></h2>
+      <div id="trade-chart" class="trade-chart"></div>
+      <p class="why-foot">화살표 옆 글자: 롱·숏을 열거나 늘린 체결은 "롱 8"처럼 그 뒤 포지션, 닫은 체결은 닫은 몫의 실현 손익(수수료 전). 체결가는 LS 주문내역 기준이고, 봉 단위는 기간에 맞춰 1 · 5 · 15 · 60분봉 중에서 고릅니다.</p>
+    </section>
+    <section class="card">
       <h2>대회 달력 <small>하루 실현 손익(대회 기준: 증권사 수수료와 대회 차감을 뺌) · 한국 날짜</small></h2>
       <div class="table-scroll"><table class="cal">
         <thead><tr><th>월</th><th>화</th><th>수</th><th>목</th><th>금</th><th>토</th><th>일</th><th>주 합계</th></tr></thead>
@@ -47,6 +53,7 @@
           <th title="체결 1계약당 증권사 $1 + 대회 차감 $1">수수료</th><th>상태</th><th>주문번호</th></tr></thead>
         <tbody id="rows"><tr><td colspan="11" class="empty">불러오는 중…</td></tr></tbody>
       </table></div>
+      <div id="pager" class="pager" hidden></div>
       <p class="why-foot">체결가는 LS 주문내역에서 대회 첫날부터 받습니다. LS에 체결가가 없는 주문은 주문 때 가격으로 계산합니다.</p>
     </section>
   </main>

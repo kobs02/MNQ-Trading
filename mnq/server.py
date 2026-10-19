@@ -107,8 +107,8 @@ def api_live_modify():
 
 @app.post("/api/live/cancel")
 def api_live_cancel():
-    _json()
-    return jsonify({"canceled": live.cancel_pending()})
+    number = _json().get("number")
+    return jsonify({"canceled": live.cancel_pending(str(number) if number else None)})
 
 
 @app.post("/api/live/enabled")

@@ -25,6 +25,7 @@ PATH = config.STORE / "live.json"
 CONFIRM = 90       # 주문을 낸 뒤 이만큼(초)은 새로 내지 않고 체결을 확인한다
 EVERY = 30
 _lock = threading.Lock()
+_last_order = [0.0]  # 마지막 주문 시각(_watch_pending이 그 뒤 1분 동안 미체결을 자주 본다)
 _busy = threading.Lock()  # 자동 주문(tick)과 화면의 직접 주문이 동시에 나가지 않게
 _state = None
 status = {"checked": None, "target": None, "actual": None, "error": None, "note": None}
@@ -136,6 +137,7 @@ def _record(entry):
         del state["orders"][:-1000]
         _save()
     _account["at"] = _history["at"] = 0  # 다음 화면 조회가 5·10초 저장본이 아니라 LS의 새 값을 받게
+    _last_order[0] = time.time()
 
 
 def manual(qty=None, flip=False, reduce=None):
@@ -231,12 +233,48 @@ def _verify_unfilled(symbol, now):
     UNFILLED.write_text(json.dumps({"ok": _unfilled["ok"], "time": int(now)}), encoding="utf-8")
 
 
+# LS 주문내역은 방금 낸·정정한·취소한 주문을 몇 초 늦게 보여 준다. 그동안 화면이 옛 상태로 되돌아가지 않게 HOLD초 동안은 우리가 아는 쪽을 믿는다:
+# 주문번호 → (언제까지, 보일 미체결 또는 None = 없어진 주문)
+HOLD = 10
+_hold = {}
+
+
+def _hold_pending(number, entry=None):
+    _hold[number] = (time.time() + HOLD, entry)
+
+
 def _pending(symbol):
-    """미체결 주문(LS 주문내역에서 UnercQty > 0)을 읽고 화면용으로 status["pending"]에 줄여 둔다."""
+    """미체결 주문(LS 주문내역에서 UnercQty > 0)을 읽고 화면용으로 status["pending"]에 줄여 둔다(_hold를 덧씌워서). LS 행을 그대로 돌려준다."""
     rows = _open_rows(symbol)
-    status["pending"] = [{"number": o.get("OvrsFutsOrdNo"), "qty": (1 if o.get("BnsTpCode") == "2" else -1) * int(o["UnercQty"]),
-                          "price": float(o.get("OvrsDrvtOrdPrc") or 0), "limit": o.get("AbrdFutsOrdPtnCode") == "2"} for o in rows]
+    shown = {o.get("OvrsFutsOrdNo"): {"number": o.get("OvrsFutsOrdNo"), "qty": (1 if o.get("BnsTpCode") == "2" else -1) * int(o["UnercQty"]),
+                                      "price": float(o.get("OvrsDrvtOrdPrc") or 0), "limit": o.get("AbrdFutsOrdPtnCode") == "2"} for o in rows}
+    now = time.time()
+    for number, (until, entry) in list(_hold.items()):
+        if now > until:
+            _hold.pop(number, None)
+        elif entry is None:
+            shown.pop(number, None)
+        else:
+            shown.setdefault(number, entry)
+    status["pending"] = list(shown.values())
     return rows
+
+
+def _watch_pending():
+    """미체결이 있거나 방금 주문했으면 2초마다 LS 미체결만 묻기로 화면의 미체결을 새로 한다(30초 확인을 기다리면 체결된 선이 남아 있었다).
+    체결·취소로 미체결이 바뀌면 계좌·주문 기록 저장본도 바로 새로 받게 한다. 미체결만 묻기를 아직 못 믿으면(전체 내역은 3 ~ 8초) 하지 않는다."""
+    while True:
+        time.sleep(2)
+        symbol = paper.status["symbol"]
+        if not symbol or not _unfilled_ok() or not (status.get("pending") or time.time() - _last_order[0] < 60):
+            continue
+        try:
+            before = {p["number"] for p in status.get("pending") or []}
+            _pending(symbol)
+            if before != {p["number"] for p in status["pending"]}:
+                _account["at"] = _history["at"] = 0
+        except Exception as e:
+            log.debug("미체결 새로 묻기 실패: %s", e)
 
 
 def _reduce(actual, n):
@@ -288,6 +326,8 @@ def limit_close(price, qty=None, reduce=None):
         # 위에서 미체결이 없음을 봤으니 지금 미체결은 방금 낸 것뿐이다: LS를 다시 묻지 않고 바로 보여 준다(LS 내역에 늦게 잡혀도 차트에 선이 바로 생긴다).
         # 바로 체결됐으면 다음 30초 확인이 LS 내역으로 지운다
         status["pending"] = [{"number": entry["number"], "qty": qty, "price": price, "limit": True}] if entry["ok"] else []
+        if entry["ok"]:
+            _hold_pending(entry["number"], status["pending"][0])
     return entry
 
 
@@ -319,23 +359,38 @@ def modify_limit(number, price):
                 if o.get("number") and int(o["number"]) == int(number):  # LS는 0000000778, 기록은 778로 올 때가 있다
                     o.update(number=new, price=price)
             _save()
-        _pending(symbol)
+        # LS 주문내역에 새 번호가 늦게 잡히므로 다시 묻지 않고 바로 바꿔 둔다(다시 물으면 옛 번호·옛 가격이 와서 화면 선이 되돌아갔다)
+        status["pending"] = [{**p, "number": new, "price": price} if p.get("number") == number else p for p in status.get("pending", [])]
+        _hold_pending(number)
+        _hold_pending(new, next((p for p in status["pending"] if p["number"] == new), None) or {"number": new, "qty": qty, "price": price, "limit": True})
     return {"number": new, "price": price}
 
 
-def cancel_pending():
-    """화면의 '미체결 취소': 지금 종목의 미체결 주문을 모두 취소한다. 취소한 건수."""
+def cancel_pending(number=None):
+    """화면의 '미체결 취소': 지금 종목의 미체결 주문을 모두(number를 주면 그 주문만, 차트 이름표의 X) 취소한다. 취소한 건수."""
     symbol = paper.status["symbol"]
     if not symbol:
         raise ValueError("아직 종목을 모릅니다")
     with _busy:
-        rows = _pending(symbol)
-        for o in rows:
-            ls.cancel(symbol, o["OvrsFutsOrdNo"])
-            log.warning("LS 모의계좌: 미체결 주문 %s를 취소했습니다", o["OvrsFutsOrdNo"])
+        _pending(symbol)
+        # 방금 낸 주문은 LS 내역에 아직 없을 수 있으므로 화면에 보이는 미체결(_hold 포함)을 취소한다
+        numbers = [p["number"] for p in status["pending"] if number is None or p["number"] == number]
+        if number is not None and not numbers:
+            raise ValueError("취소할 미체결 주문이 없습니다(이미 체결됐거나 취소됐을 수 있습니다)")
+        done, errors = 0, []
+        for n in numbers:
+            try:
+                ls.cancel(symbol, n)
+                _hold_pending(n)
+                done += 1
+                log.warning("LS 모의계좌: 미체결 주문 %s를 취소했습니다", n)
+            except Exception as e:  # 그 사이 체결된 주문 등: 나머지는 계속 취소한다
+                errors.append(f"{n}: {e}")
         _pending(symbol)
     _account["at"] = 0
-    return len(rows)
+    if errors and not done:
+        raise ValueError("취소하지 못했습니다(이미 체결됐을 수 있습니다) " + "; ".join(errors))
+    return done
 
 
 def week_fills(orders, now=None):
@@ -436,6 +491,7 @@ def run():
                 status["error"] = f"{datetime.now():%m-%d %H:%M} {e}"
             time.sleep(EVERY)
     threading.Thread(target=loop, name="live", daemon=True).start()
+    threading.Thread(target=_watch_pending, name="live-pending", daemon=True).start()
 
 
 _account = {"at": 0, "data": None}
@@ -680,14 +736,23 @@ if __name__ == "__main__":
     ls.modify = lambda symbol, number, qty, price: mods.append((number, qty, price)) or "0000000004"
     assert modify_limit("0000000002", 30020.0) == {"number": "0000000004", "price": 30020.0}
     assert mods == [("0000000002", -2, 30020.0)] and any(o.get("number") == "0000000004" and o["price"] == 30020.0 for o in _state["orders"]), mods
+    assert status["pending"] == [{"number": "0000000004", "qty": -2, "price": 30020.0, "limit": True}], status["pending"]
     for number, price in (("0000000009", 30020.0), ("0000000002", 30020.1)):
         try:
             modify_limit(number, price)
             raise AssertionError((number, price))
         except ValueError:
             pass
+    _hold.clear()  # 가짜 LS는 정정을 내역에 반영하지 않는다: 위 정정의 새 번호(4)를 화면에 붙들어 둔 것을 지운다
     ls.orders = lambda symbol, **k: [] if cancels else book["pending"]  # 취소하면 미체결이 사라진다
     assert cancel_pending() == 1 and cancels == ["0000000002"] and status["pending"] == []
+    _hold.clear()
+    ls.orders = lambda symbol, **k: book["pending"]
+    _hold_pending("0000000007", {"number": "0000000007", "qty": 1, "price": 30000.0, "limit": True})
+    _hold_pending("0000000002")
+    _pending("MNQZ26")
+    assert status["pending"] == [{"number": "0000000007", "qty": 1, "price": 30000.0, "limit": True}], status["pending"]
+    _hold.clear()
     # 장중의 포지션 정리는 루프를 기다리지 않고 바로: 미체결 취소 → 시장가로 닫기, 자동 주문 끔
     book["pos"], _state["enabled"], cancels[:] = 2, True, []
     ls.orders = lambda symbol, **k: [] if cancels else book["pending"]

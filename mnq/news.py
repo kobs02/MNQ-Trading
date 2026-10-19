@@ -242,7 +242,7 @@ def _load_vol():
             c = yf.Ticker(sym).history(period="3mo")["Close"].dropna()
             if len(c) > 1:
                 out[key] = {"value": round(float(c.iloc[-1]), 2), "prev": round(float(c.iloc[-2]), 2), "avg": round(float(c.tail(60).mean()), 2),
-                            "history": [round(float(v), 2) for v in c.tail(30)]}
+                            "history": [round(float(v), 2) for v in c.tail(30)], "times": [int(t.timestamp()) for t in c.tail(30).index]}
     except Exception:
         pass
     _vol_cache = (time.time(), out)

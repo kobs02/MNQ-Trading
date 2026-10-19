@@ -30,6 +30,32 @@ function walk(orders, mult, fee) {
   });
 }
 
+// 체결 표: 최근 것부터 PAGE건씩 쪽으로 나눈다. 15초마다 새로 받아도 보던 쪽은 그대로
+const PAGE = 10;
+let table = [], page = 0;
+function renderRows() {
+  const pages = Math.max(1, Math.ceil(table.length / PAGE));
+  page = Math.min(page, pages - 1);
+  $('rows').innerHTML = table.length ? table.slice(page * PAGE, page * PAGE + PAGE).map((r) => {
+    const slip = r.exec_price && r.price && !r.limit ? Math.sign(r.qty) * (r.exec_price - r.price) / 0.25 : null;  // + = 불리
+    const state = !r.ok ? `<span class="c-down">실패</span> ${r.error || ''}` : r.unfilled ? `미체결 ${r.unfilled}` : r.canceled ? `취소 ${r.canceled}` : r.state ? '체결' : '체결(추정)';
+    return `<tr><td>${fmtTime(r.time)}</td><td>${r.kind}</td><td><b class="${tone(r.qty)}">${r.qty > 0 ? '매수' : '매도'} ${Math.abs(r.qty)}</b></td>`
+      + `<td>${r.from != null ? `${side(r.from)} → ${side(r.to)}` : `→ ${side(r.pos)}`}</td><td>${fmtPrice(r.price)}</td><td>${r.exec_price ? fmtPrice(r.exec_price) : '-'}</td>`
+      + `<td class="${slip > 0 ? 'c-down' : slip < 0 ? 'c-up' : ''}">${slip == null ? '-' : `${slip > 0 ? '+' : ''}${slip.toFixed(1)}틱`}</td>`
+      + `<td>${r.realized == null ? '-' : `<b class="${tone(r.realized)}">${fmtMoney(r.realized)}</b>`}</td><td>${r.filled ? fmtMoney(r.fee) : '-'}</td><td>${state}</td><td>${r.number || '-'}</td></tr>`;
+  }).join('') : '<tr><td colspan="11" class="empty">아직 주문이 없습니다.</td></tr>';
+  $('pager').hidden = pages < 2;
+  $('pager').innerHTML = `<button type="button" class="plain-button" data-go="-1"${page ? '' : ' disabled'}>← 최근</button>`
+    + `<span>${page + 1} / ${pages} 쪽 · ${table.length}건</span>`
+    + `<button type="button" class="plain-button" data-go="1"${page < pages - 1 ? '' : ' disabled'}>이전 →</button>`;
+}
+$('pager').addEventListener('click', (e) => {
+  const go = Number(e.target.dataset.go);
+  if (!go) return;
+  page += go;
+  renderRows();
+});
+
 function render(d) {
   const rows = walk(d.orders, d.multiplier, d.fee);
   const fills = rows.filter((r) => r.filled);
@@ -44,15 +70,10 @@ function render(d) {
     stat('체결', `${fills.length}건`, `${fills.reduce((s, r) => s + Math.abs(r.filled), 0)}계약`),
     stat('청산 승률', closes.length ? `${Math.round((wins / closes.length) * 100)}%` : '-', `${wins} / ${closes.length}`),
   ].join('');
-  $('rows').innerHTML = rows.length ? rows.slice().reverse().map((r) => {
-    const slip = r.exec_price && r.price && !r.limit ? Math.sign(r.qty) * (r.exec_price - r.price) / 0.25 : null;  // + = 불리
-    const state = !r.ok ? `<span class="c-down">실패</span> ${r.error || ''}` : r.unfilled ? `미체결 ${r.unfilled}` : r.canceled ? `취소 ${r.canceled}` : r.state ? '체결' : '체결(추정)';
-    return `<tr><td>${fmtTime(r.time)}</td><td>${r.kind}</td><td><b class="${tone(r.qty)}">${r.qty > 0 ? '매수' : '매도'} ${Math.abs(r.qty)}</b></td>`
-      + `<td>${r.from != null ? `${side(r.from)} → ${side(r.to)}` : `→ ${side(r.pos)}`}</td><td>${fmtPrice(r.price)}</td><td>${r.exec_price ? fmtPrice(r.exec_price) : '-'}</td>`
-      + `<td class="${slip > 0 ? 'c-down' : slip < 0 ? 'c-up' : ''}">${slip == null ? '-' : `${slip > 0 ? '+' : ''}${slip.toFixed(1)}틱`}</td>`
-      + `<td>${r.realized == null ? '-' : `<b class="${tone(r.realized)}">${fmtMoney(r.realized)}</b>`}</td><td>${r.filled ? fmtMoney(r.fee) : '-'}</td><td>${state}</td><td>${r.number || '-'}</td></tr>`;
-  }).join('') : '<tr><td colspan="11" class="empty">아직 주문이 없습니다.</td></tr>';
+  table = rows.slice().reverse();
+  renderRows();
   renderCalendar(rows, d);
+  renderChart(rows);
   $('updated').textContent = `${new Date().toLocaleTimeString('ko-KR')} 조회`;
 }
 
@@ -84,6 +105,59 @@ function renderCalendar(rows, d) {
     weeks.push(`<tr>${cells}<td class="cal-week">${begun ? cell(week, '') : ''}</td></tr>`);  // 아직 안 온 주는 비운다
   }
   $('cal').innerHTML = weeks.join('');
+}
+
+// 매매 차트: 첫 체결 ~ 마지막 체결 구간의 봉에 체결을 화살표로. 봉 단위는 그 구간이 받아 오는 봉(1,000개) 안에 들어가는 가장 짧은 것
+const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const TZ = -new Date().getTimezoneOffset() * 60;  // lightweight-charts는 UTC로 그리므로 브라우저 시각으로 옮긴다(실시간 차트와 같게)
+let tradeChart = null, tradeSeries = null, shown = [];
+function chartTheme() {
+  tradeChart.applyOptions({
+    layout: { textColor: token('--text-2') }, grid: { vertLines: { color: token('--grid') }, horzLines: { color: token('--grid') } },
+    rightPriceScale: { borderColor: token('--border') }, timeScale: { borderColor: token('--border') },
+  });
+  tradeSeries.applyOptions({ upColor: token('--long'), downColor: token('--short'), wickUpColor: token('--long'), wickDownColor: token('--short') });
+}
+async function renderChart(rows) {
+  shown = rows;
+  const fills = rows.filter((r) => r.filled && r.px);
+  if (!fills.length) {
+    $('trade-chart').innerHTML = '<p class="empty">아직 체결이 없습니다.</p>';
+    return;
+  }
+  const first = fills[0].time, last = fills[fills.length - 1].time;
+  const minutes = [1, 5, 15, 60].find((m) => (Date.now() / 1000 - first) / (m * 60) < 900) || 60;
+  const step = minutes * 60, pad = 6 * step;
+  let bars;
+  try {
+    const r = await fetch(`/api/chart?interval=${minutes}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    bars = (await r.json()).bars.filter((b) => b.time >= first - pad && b.time <= last + pad);
+  } catch (e) {
+    $('trade-chart-note').textContent = '차트를 불러오지 못했습니다: ' + e.message;
+    return;
+  }
+  if (!tradeChart) {
+    tradeChart = LightweightCharts.createChart($('trade-chart'), {
+      autoSize: true, layout: { background: { color: 'transparent' }, fontFamily: 'inherit', fontSize: 13 },
+      timeScale: { timeVisible: true, secondsVisible: false }, crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, localization: { locale: 'ko-KR' },
+    });
+    tradeSeries = tradeChart.addCandlestickSeries({ borderVisible: false, priceFormat: { type: 'custom', minMove: 0.25, formatter: fmtPrice } });
+    chartTheme();
+    document.addEventListener('themechange', () => { chartTheme(); renderChart(shown); });  // 화살표 색도 새 테마로
+  }
+  const fresh = !tradeSeries.data().length;
+  tradeSeries.setData(bars.map((b) => ({ ...b, time: b.time + TZ })));
+  tradeSeries.setMarkers(fills.map((r) => {
+    const buy = r.filled > 0;
+    return {
+      time: Math.floor(r.time / step) * step + TZ, position: buy ? 'belowBar' : 'aboveBar', shape: buy ? 'arrowUp' : 'arrowDown',
+      color: token(r.realized != null ? (r.realized >= 0 ? '--long' : '--short') : buy ? '--long' : '--short'),
+      text: r.realized != null ? `정리 ${r.realized >= 0 ? '+' : ''}${fmtMoney(r.realized)}` : side(r.pos),
+    };
+  }));
+  if (fresh) tradeChart.timeScale().fitContent();
+  $('trade-chart-note').textContent = `${fmtTime(first)} ~ ${fmtTime(last)} · ${minutes}분봉 · ▲ 매수 · ▼ 매도 · 한국 시각`;
 }
 
 async function tick() {

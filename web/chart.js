@@ -560,8 +560,12 @@ function renderOrderTags() {
     const y = series.priceToCoordinate(v.price);
     if (y == null) return '';
     const w = [...v.tag].reduce((s, ch) => s + (ch.charCodeAt(0) > 0x2e00 ? 12 : 6.6), 16);  // 한글은 넓게 어림
-    return `<rect x="8" y="${y - 11}" width="${w}" height="22" rx="3" fill="${v.order.qty > 0 ? ORDER_BUY : ORDER_SELL}" stroke="#fff" stroke-width="1.5"/>`
-      + `<text x="16" y="${y + 4.5}" fill="#fff" font-size="12" font-weight="700">${v.tag}</text>`;
+    v.close = { x: 8 + w, y: y - 11, w: 22, h: 22 };  // 오른쪽 끝 X: 누르면 이 주문만 취소(누르는 자리는 아래 pointerdown이 본다)
+    const color = v.order.qty > 0 ? ORDER_BUY : ORDER_SELL;
+    return `<rect x="8" y="${y - 11}" width="${w + 22}" height="22" rx="3" fill="${color}" stroke="#fff" stroke-width="1.5"/>`
+      + `<text x="16" y="${y + 4.5}" fill="#fff" font-size="12" font-weight="700">${v.tag}</text>`
+      + `<line x1="${8 + w}" y1="${y - 11}" x2="${8 + w}" y2="${y + 11}" stroke="#fff" stroke-opacity=".6"/>`
+      + `<path d="M${8 + w + 7} ${y - 4}l8 8m0 -8l-8 8" stroke="#fff" stroke-width="2" stroke-linecap="round"/>`;
   }).join('');
 }
 (function () {
@@ -575,12 +579,34 @@ function renderOrderTags() {
     }
     return null;
   };
-  wrap.addEventListener('pointerdown', (e) => {
+  const closeAt = (e) => {  // 마우스 밑의 이름표 X(그 주문번호)
+    const r = $('chart').getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    for (const [n, v] of orderLines) if (v.close && x >= v.close.x && x <= v.close.x + v.close.w && y >= v.close.y && y <= v.close.y + v.close.h) return n;
+    return null;
+  };
+  wrap.addEventListener('pointerdown', async (e) => {
     if (e.button !== 0 || e.shiftKey || e.ctrlKey) return;
+    const number = closeAt(e);
+    if (number) {
+      e.stopPropagation();
+      e.preventDefault();
+      const v = orderLines.get(number);
+      v.tag = '취소 중…';
+      renderDrawings();
+      try {
+        await post('/api/live/cancel', { number });
+        notice(`지정가 ${v.order.qty > 0 ? '매수' : '매도'} ${Math.abs(v.order.qty)} @ ${fmtPrice(v.order.price)}를 취소했습니다.`);
+      } catch (err) {
+        notice('취소하지 못했습니다: ' + err.message);
+      }
+      afterOrder();
+      return;
+    }
     const hit = near(e);
     if (!hit) return;
     e.stopPropagation();
     e.preventDefault();
+    if (orderLines.get(hit.number).busy) return notice('앞의 정정이 끝나면 다시 끌어 주세요(1초쯤).');  // 정정 중에는 주문번호가 바뀌는 중이라
     orderDrag = { ...hit, price: hit.order.price };
     try { wrap.setPointerCapture(e.pointerId); } catch (err) { /* 잡지 못해도 차트 안에서는 그대로 끌린다 */ }
     const move = (ev) => {
@@ -603,23 +629,32 @@ function renderOrderTags() {
       const now = state.quote ? state.quote.price : null;
       const crosses = now != null && (order.qty < 0 ? price <= now : price >= now);
       if (crosses && !await ask(`지정가 ${fmtPrice(order.price)} → ${fmtPrice(price)}${fillPnl(order, price).replace(' · ', '\n')}\n지금 가격(${fmtPrice(now)})을 넘는 가격이라 바로 체결될 수 있습니다. 정정할까요?`, '지정가 정정')) return back();
+      const v = orderLines.get(number);
+      Object.assign(v, { busy: true, tag: `정정 중 ${fmtPrice(price)}` });
+      renderDrawings();
       try {
         const r = await post('/api/live/modify', { number, price });
-        Object.assign(orderLines.get(number), { price: r.price, tag: `정정 중 ${fmtPrice(r.price)}` });
-        renderDrawings();
+        // 정정하면 LS 주문번호가 바뀐다: 선을 새 번호로 옮겨 둬야 이어서 다시 끌 때 옛 번호로 보내지 않는다
+        orderLines.delete(number);
+        orderLines.set(r.number, Object.assign(v, { order: { ...order, number: r.number, price: r.price }, price: r.price }));
+        v.tag = orderTitle(v.order);
       } catch (err) {
         notice('정정하지 못했습니다: ' + err.message);
       }
+      v.busy = false;
       orderDrag = null;
+      renderOrderLines([...orderLines.values()].map((x) => x.order));
       api('/api/live').then(renderLive).catch(() => {});
     };
     wrap.addEventListener('pointermove', move, true);
     wrap.addEventListener('pointerup', up, { capture: true, once: true });
   }, true);
   // 선 위에서는 위아래 화살표 커서. 끄는 동안 차트가 같이 끌리지 않게 마우스 이벤트도 막는다
-  wrap.addEventListener('pointermove', (e) => { if (!orderDrag) wrap.style.cursor = near(e) ? 'ns-resize' : wrap.style.cursor === 'ns-resize' ? '' : wrap.style.cursor; });  // 박스 손잡이 커서는 건드리지 않는다
+  wrap.addEventListener('pointermove', (e) => {  // 박스 손잡이 커서는 건드리지 않는다
+    if (!orderDrag) wrap.style.cursor = closeAt(e) ? 'pointer' : near(e) ? 'ns-resize' : ['ns-resize', 'pointer'].includes(wrap.style.cursor) ? '' : wrap.style.cursor;
+  });
   ['mousedown', 'mousemove', 'mouseup'].forEach((t) => wrap.addEventListener(t, (e) => {
-    if (orderDrag || (t === 'mousedown' && e.button === 0 && !e.shiftKey && !e.ctrlKey && near(e))) e.stopPropagation();
+    if (orderDrag || (t === 'mousedown' && e.button === 0 && !e.shiftKey && !e.ctrlKey && (near(e) || closeAt(e)))) e.stopPropagation();
   }, true));
   // 우클릭: 그 높이의 가격으로 지정가 매수·매도·정리를 고르는 작은 메뉴. 고르면 가격 칸을 채우고 오른쪽 버튼과 같은 확인 창
   const menu = $('ctx-menu'), hide = () => { menu.hidden = true; };
@@ -990,6 +1025,9 @@ function renderLive(d) {
   t.classList.toggle('active', d.enabled);
   t.setAttribute('aria-pressed', d.enabled);
   t.dataset.on = d.enabled;
+  const seen = (d.pending || []).map((o) => o.number).join();
+  if (state.live && seen !== state.pendingSeen) tickAccount();  // 미체결이 체결·취소되면 포지션 칸도 바로 새로
+  state.pendingSeen = seen;
   state.live = d;  // 비중 막대가 1계약 증거금과 최대 계약 수를 쓴다
   renderOrderLines(d.pending);
   const n = (d.pending || []).length;
@@ -1343,3 +1381,4 @@ setInterval(() => document.querySelectorAll('[data-until]').forEach((el) => { el
 setInterval(tickBars, 500);
 setInterval(tickTrading, 15000);
 setInterval(tickAccount, 5000);
+setInterval(() => { if (!document.hidden) api('/api/live').then(renderLive).catch(() => {}); }, 2000);  // 미체결 선: 서버가 2초마다 LS에 묻는 값
