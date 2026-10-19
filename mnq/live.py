@@ -138,10 +138,14 @@ def _record(entry):
     _account["at"] = _history["at"] = 0  # 다음 화면 조회가 5·10초 저장본이 아니라 LS의 새 값을 받게
 
 
-def manual(qty=None, flip=False):
+def manual(qty=None, flip=False, reduce=None):
     """화면의 매수(+)·매도(-) 버튼. 자동 주문을 먼저 끈다(켜 두면 30초 뒤 목표 계약 수로 되돌린다).
-    flip이면 주문 직전에 읽은 실제 포지션의 반대로 뒤집는다(롱 n → 숏 n: 매도 2n 한 건)."""
-    if not flip and (type(qty) is not int or not qty):
+    flip이면 주문 직전에 읽은 실제 포지션의 반대로 뒤집는다(롱 n → 숏 n: 매도 2n 한 건).
+    reduce = n이면 분할 정리: 실제 포지션에서 n계약만 시장가로 닫는다."""
+    if reduce is not None:
+        if type(reduce) is not int or flip or qty is not None:
+            raise ValueError("정리할 계약 수가 올바르지 않습니다")
+    elif not flip and (type(qty) is not int or not qty):
         raise ValueError("계약 수가 올바르지 않습니다")
     symbol = paper.status["symbol"]
     if not symbol:
@@ -157,15 +161,17 @@ def manual(qty=None, flip=False):
             _save()
         # 주문내역과 미결제잔고는 TR이 달라 초당 한도를 따로 센다: 같이 물어 주문 전 기다림을 반으로(각 0.3 ~ 1.3초)
         with ThreadPoolExecutor(2) as pool:
-            rows, net = pool.submit(ls.orders, symbol), pool.submit(ls.positions)
+            rows, net = pool.submit(_open_rows, symbol), pool.submit(ls.positions)
             rows, net = rows.result(), net.result()[0]
-        if any(int(o.get("UnercQty") or 0) > 0 for o in rows):
+        if rows:
             raise ValueError("미체결 주문이 있습니다")
         actual = int(net.get(symbol, 0))
         if flip:
             if not actual:
                 raise ValueError("뒤집을 포지션이 없습니다")
             qty = -2 * actual
+        if reduce is not None:
+            qty = _reduce(actual, reduce)
         if abs(actual + qty) > config.LIVE["max_contracts"]:
             raise ValueError(f"주문 뒤 {actual + qty}계약이 최대({config.LIVE['max_contracts']}계약)를 넘습니다")
         entry = {"time": int(time.time()), "day": ny.strftime("%Y-%m-%d"), "symbol": symbol, "qty": qty, "from": actual, "to": actual + qty,
@@ -181,20 +187,75 @@ def manual(qty=None, flip=False):
     return entry
 
 
+# 미체결만 묻기(OrdStatCode 2)가 정말 미체결을 다 주는지는 미체결이 있을 때 전체 내역과 맞춰 봐야 안다(10-19엔 미체결이 없어 못 봄).
+# 확인 전이나 어긋난 적이 있으면 전체 내역(오늘 68건이면 4쪽, 3 ~ 8초)을 읽는다. 결과는 store/ls_unfilled.json에 남긴다
+UNFILLED = config.STORE / "ls_unfilled.json"
+_unfilled = {"ok": None, "checked": 0}
+
+
+def _unfilled_ok():
+    if _unfilled["ok"] is None:
+        try:
+            _unfilled["ok"] = json.loads(UNFILLED.read_text(encoding="utf-8"))["ok"]
+        except Exception:
+            _unfilled["ok"] = False
+    return _unfilled["ok"]
+
+
+def _open_rows(symbol):
+    """지금 종목의 미체결 주문 행(UnercQty > 0)."""
+    return [o for o in ls.orders(symbol, unfilled=_unfilled_ok()) if int(o.get("UnercQty") or 0) > 0]
+
+
+def _verify_unfilled(symbol, now):
+    """미체결만 묻기를 전체 내역과 맞춰 본다: 확인 전에는 30초 확인마다, 확인 뒤엔 10분마다(주문 잠금 밖에서, 주문을 막지 않게).
+    전체 내역의 미체결이 미체결만 묻기(앞·뒤 두 번)에 다 있으면 믿고, 하나라도 빠지면 다시 전체 내역으로 돌아간다."""
+    ok = _unfilled_ok()
+    if ok and now - _unfilled["checked"] < 600:
+        return
+    _unfilled["checked"] = now
+    fast = {o.get("OvrsFutsOrdNo") for o in ls.orders(symbol, unfilled=True) if int(o.get("UnercQty") or 0) > 0}
+    full = {o.get("OvrsFutsOrdNo") for o in ls.orders(symbol) if int(o.get("UnercQty") or 0) > 0}
+    if not full - fast:
+        if full and not ok:
+            log.info("LS 미체결만 묻기가 전체 내역과 맞습니다(%d건): 이제 주문 전 확인을 빠른 쪽으로 합니다", len(full))
+            _unfilled["ok"] = True
+        else:
+            return
+    else:
+        fast |= {o.get("OvrsFutsOrdNo") for o in ls.orders(symbol, unfilled=True) if int(o.get("UnercQty") or 0) > 0}  # 그 사이 새로 낸 주문일 수 있다
+        if not full - fast:
+            return
+        log.error("LS 미체결만 묻기에 미체결 %s가 빠졌습니다: 전체 내역으로 돌아갑니다", sorted(full - fast))
+        _unfilled["ok"] = False
+    UNFILLED.write_text(json.dumps({"ok": _unfilled["ok"], "time": int(now)}), encoding="utf-8")
+
+
 def _pending(symbol):
     """미체결 주문(LS 주문내역에서 UnercQty > 0)을 읽고 화면용으로 status["pending"]에 줄여 둔다."""
-    rows = [o for o in ls.orders(symbol) if int(o.get("UnercQty") or 0) > 0]
+    rows = _open_rows(symbol)
     status["pending"] = [{"number": o.get("OvrsFutsOrdNo"), "qty": (1 if o.get("BnsTpCode") == "2" else -1) * int(o["UnercQty"]),
                           "price": float(o.get("OvrsDrvtOrdPrc") or 0), "limit": o.get("AbrdFutsOrdPtnCode") == "2"} for o in rows]
     return rows
 
 
-def limit_close(price, qty=None):
-    """화면의 '지정가로 정리'(qty 없음): 지금 포지션 전부를 그 가격의 지정가 한 건으로 닫는다.
+def _reduce(actual, n):
+    """분할 정리: 지금 포지션에서 n계약만 닫는 주문 수량. 주문 직전의 실제 포지션으로 계산해 0을 넘어 뒤집히지 않게 한다."""
+    if not actual:
+        raise ValueError("정리할 포지션이 없습니다")
+    if not 1 <= n <= abs(actual):
+        raise ValueError(f"정리할 계약 수({n})가 지금 포지션({abs(actual)}계약)과 맞지 않습니다")
+    return -n if actual > 0 else n
+
+
+def limit_close(price, qty=None, reduce=None):
+    """화면의 '지정가로 정리'(qty 없음): 지금 포지션 전부(reduce = n이면 n계약만)를 그 가격의 지정가 한 건으로 닫는다.
     '지정가 매수·매도'(qty = +n·-n): 그 가격에 n계약 지정가 진입. 자동 주문은 먼저 끈다
     (켜 두면 미체결 동안은 기다리다가 체결 뒤 목표 계약 수로 다시 들기 때문). 미체결은 cancel_pending으로 취소한다."""
     if qty is not None and (type(qty) is not int or not qty):
         raise ValueError("계약 수가 올바르지 않습니다")
+    if reduce is not None and (type(reduce) is not int or qty is not None):
+        raise ValueError("정리할 계약 수가 올바르지 않습니다")
     symbol = _check_price(price)
     if not started():
         raise ValueError("대회 시작 전에는 주문하지 않습니다")
@@ -211,7 +272,7 @@ def limit_close(price, qty=None):
         close = qty is None
         if close and not actual:
             raise ValueError("정리할 포지션이 없습니다")
-        qty = -actual if close else qty
+        qty = (-actual if reduce is None else _reduce(actual, reduce)) if close else qty
         if abs(actual + qty) > config.LIVE["max_contracts"]:
             raise ValueError(f"체결 뒤 {actual + qty}계약이 최대({config.LIVE['max_contracts']}계약)를 넘습니다")
         entry = {"time": int(time.time()), "day": ny.strftime("%Y-%m-%d"), "symbol": symbol, "qty": qty, "from": actual, "to": actual + qty,
@@ -224,7 +285,9 @@ def limit_close(price, qty=None):
             entry.update(ok=False, error=str(e))
             log.error("LS 모의계좌 지정가 %s 실패: %s", "정리" if close else "진입", e)
         _record(entry)
-        _pending(symbol)
+        # 위에서 미체결이 없음을 봤으니 지금 미체결은 방금 낸 것뿐이다: LS를 다시 묻지 않고 바로 보여 준다(LS 내역에 늦게 잡혀도 차트에 선이 바로 생긴다).
+        # 바로 체결됐으면 다음 30초 확인이 LS 내역으로 지운다
+        status["pending"] = [{"number": entry["number"], "qty": qty, "price": price, "limit": True}] if entry["ok"] else []
     return entry
 
 
@@ -244,7 +307,7 @@ def modify_limit(number, price):
     """화면에서 지정가 선을 끌어 옮기면: 그 미체결 지정가 주문의 가격을 정정한다. 정정되면 주문번호가 바뀌므로 기록도 새 번호로 고친다."""
     symbol = _check_price(price)
     with _busy:
-        row = next((o for o in ls.orders(symbol) if o.get("OvrsFutsOrdNo") == number and int(o.get("UnercQty") or 0) > 0), None)
+        row = next((o for o in _open_rows(symbol) if o.get("OvrsFutsOrdNo") == number), None)
         if not row or row.get("AbrdFutsOrdPtnCode") != "2":
             raise ValueError("정정할 미체결 지정가 주문이 없습니다(이미 체결됐거나 취소됐을 수 있습니다)")
         qty = (1 if row.get("BnsTpCode") == "2" else -1) * int(row["UnercQty"])
@@ -288,6 +351,11 @@ def filler_due(orders, ny, now=None):
 
 
 def tick():
+    if paper.status["symbol"]:
+        try:
+            _verify_unfilled(paper.status["symbol"], time.time())
+        except Exception as e:
+            log.warning("LS 미체결만 묻기 점검 실패: %s", e)
     with _busy:
         _tick()
 
@@ -477,10 +545,11 @@ if __name__ == "__main__":
     import tempfile
     from pathlib import Path
     PATH = Path(tempfile.mkdtemp()) / "live.json"
+    UNFILLED = PATH.with_name("ls_unfilled.json")
     _state = None
     sent, book = [], {"pos": 0, "pending": []}
     ls.positions = lambda: ({"MNQZ26": book["pos"]}, [])
-    ls.orders = lambda symbol: book["pending"]
+    ls.orders = lambda symbol, **k: book["pending"]
     ls.market_order = lambda symbol, qty: sent.append(qty) or "0000000001"
     paper.status["symbol"], paper.status["price"] = "MNQZ26", 30000.0
     paper._load = lambda: {config.LIVE["candidate"]: {"contracts": 2}}
@@ -548,6 +617,7 @@ if __name__ == "__main__":
     book["pos"], _state["enabled"] = 2, True
     limit_close(30010.25)
     assert limits == [(-2, 30010.25)] and not _state["enabled"] and _state["orders"][-1]["limit"], limits
+    assert status["pending"] == [{"number": "0000000002", "qty": -2, "price": 30010.25, "limit": True}]  # LS에 늦게 잡혀도 바로 미체결로 보인다
     limit_close(29990.0, 3)                       # 지정가 진입: 롱 2에 매수 3 → 체결되면 롱 5
     assert limits[-1] == (3, 29990.0) and _state["orders"][-1]["to"] == 5, limits
     for bad in (19, 0, 1.5):                      # 최대 초과(21), 0, 소수는 거절
@@ -556,7 +626,17 @@ if __name__ == "__main__":
             raise AssertionError(bad)
         except ValueError:
             pass
-    limits.pop()
+    limit_close(30010.0, reduce=1)                # 분할 정리: 롱 2에서 1계약만 매도
+    assert limits[-1] == (-1, 30010.0) and _state["orders"][-1]["to"] == 1, limits
+    for bad in (3, 0, 1.5):                       # 포지션보다 많이(뒤집힘), 0, 소수는 거절
+        try:
+            limit_close(30010.0, reduce=bad)
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+    manual(reduce=2)                              # 시장가 분할 정리: 롱 2 → 0
+    assert sent[-1] == -2 and _state["orders"][-1]["to"] == 0, sent
+    limits.pop(); limits.pop()
     book["pending"] = [{"UnercQty": "2", "OvrsFutsOrdNo": "0000000002", "BnsTpCode": "1", "OvrsDrvtOrdPrc": "30010.25", "AbrdFutsOrdPtnCode": "2"}]
     tick()
     assert status["pending"] == [{"number": "0000000002", "qty": -2, "price": 30010.25, "limit": True}], status["pending"]
@@ -582,14 +662,14 @@ if __name__ == "__main__":
             raise AssertionError((number, price))
         except ValueError:
             pass
-    ls.orders = lambda symbol: [] if cancels else book["pending"]  # 취소하면 미체결이 사라진다
+    ls.orders = lambda symbol, **k: [] if cancels else book["pending"]  # 취소하면 미체결이 사라진다
     assert cancel_pending() == 1 and cancels == ["0000000002"] and status["pending"] == []
     # 장중의 포지션 정리는 루프를 기다리지 않고 바로: 미체결 취소 → 시장가로 닫기, 자동 주문 끔
     book["pos"], _state["enabled"], cancels[:] = 2, True, []
-    ls.orders = lambda symbol: [] if cancels else book["pending"]
+    ls.orders = lambda symbol, **k: [] if cancels else book["pending"]
     flatten()
     assert cancels == ["0000000002"] and sent[-1] == -2 and _state["orders"][-1]["flatten"] and not _state["enabled"] and not _state["flatten"], sent
-    ls.orders = lambda symbol: book["pending"]
+    ls.orders = lambda symbol, **k: book["pending"]
     book["pending"] = []
     book["pos"] = -2
     # 주간 최소 거래: 목표와 같아도 모자라면 0 쪽으로 1계약, 다음 확인 때 목표로 되돌린다
@@ -619,4 +699,14 @@ if __name__ == "__main__":
         raise AssertionError("없는 후보를 받았다")
     except ValueError:
         pass
+    # 미체결만 묻기 점검: 전체 내역의 미체결이 다 있으면 믿고, 빠지면 전체 내역으로 돌아간다
+    one = [{"OvrsFutsOrdNo": "7", "UnercQty": "1"}]
+    _unfilled.update(ok=False, checked=0)
+    ls.orders = lambda symbol, unfilled=False: one
+    _verify_unfilled("MNQZ26", 1000)
+    assert _unfilled["ok"] and json.loads(UNFILLED.read_text())["ok"]
+    _verify_unfilled("MNQZ26", 1100)              # 믿은 뒤 10분 안에는 다시 안 본다
+    ls.orders = lambda symbol, unfilled=False: [] if unfilled else one
+    _verify_unfilled("MNQZ26", 1700)
+    assert not _unfilled["ok"] and not json.loads(UNFILLED.read_text())["ok"]
     print("live 점검 통과")

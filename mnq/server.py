@@ -90,13 +90,13 @@ def _json():
 @app.post("/api/live/order")
 def api_live_order():
     body = _json()
-    return jsonify(live.manual(body.get("qty"), flip=body.get("flip") is True))
+    return jsonify(live.manual(body.get("qty"), flip=body.get("flip") is True, reduce=body.get("reduce")))
 
 
 @app.post("/api/live/limit")
 def api_live_limit():
     body = _json()
-    return jsonify(live.limit_close(body.get("price"), body.get("qty")))
+    return jsonify(live.limit_close(body.get("price"), body.get("qty"), body.get("reduce")))
 
 
 @app.post("/api/live/modify")

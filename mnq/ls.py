@@ -68,11 +68,11 @@ def token(fresh=False):
 
 def call(tr, body, cont_key=None, _retried=False, _busy=0):
     """TR 하나를 보낸다: (응답, 다음 쪽을 이어 받을 키 또는 None)."""
+    # 자리(보낼 시각)만 잠금 안에서 잡고 기다리기는 밖에서: 한 TR의 초당 한도 기다림이 다른 TR(포지션 조회 등)을 막지 않게
     with _lock:
-        wait = _last.get(tr, 0) + 1 / PER_SEC.get(tr, 1) + 0.05 - time.time()
-        if wait > 0:
-            time.sleep(wait)
-        _last[tr] = time.time()
+        at = max(time.time(), _last.get(tr, 0) + 1 / PER_SEC.get(tr, 1) + 0.05)
+        _last[tr] = at
+    time.sleep(max(0.0, at - time.time()))
     resp = _session.post(config.BASE + PATHS[tr], json=body, timeout=15, headers={
         "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token()}",
         "tr_cd": tr, "tr_cont": "Y" if cont_key else "N", "tr_cont_key": cont_key or ""})
@@ -170,10 +170,11 @@ def positions():
     return net, rows
 
 
-def orders(symbol, day=None):
-    """그날(한국 날짜 YYYYMMDD, 기본 오늘)의 주문내역. OrdDt·OrdTime도 한국 시각이다(10-19 확인)."""
+def orders(symbol, day=None, unfilled=False):
+    """그날(한국 날짜 YYYYMMDD, 기본 오늘)의 주문내역. OrdDt·OrdTime도 한국 시각이다(10-19 확인).
+    unfilled면 미체결만(OrdStatCode 2, 10-19 확인: 0 전체·1 체결만 20건 넘음·2는 미체결 없을 때 0건) → 한 쪽이라 빠르다."""
     body = {"CIDBQ01800InBlock1": {"RecCnt": 1, "IsuCodeVal": symbol, "OrdDt": day or today(), "ThdayTpCode": " ",
-                                   "OrdStatCode": "0", "BnsTpCode": "0", "QryTpCode": "2", "OrdPtnCode": "00", "OvrsDrvtFnoTpCode": "A"}}
+                                   "OrdStatCode": "2" if unfilled else "0", "BnsTpCode": "0", "QryTpCode": "2", "OrdPtnCode": "00", "OvrsDrvtFnoTpCode": "A"}}
     # 한 번에 20건까지만 온다: 다음 쪽 열쇠로 끝까지 받는다(10-19: 21번째부터의 미체결 지정가를 못 봐 정리 주문이 두 번 나갔다)
     rows, key = [], None
     while True:

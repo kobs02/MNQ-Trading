@@ -77,6 +77,25 @@ let levelLines = [];
 // ---------- 봉 ----------
 const shifted = (b) => ({ ...b, time: b.time + TZ });
 
+// 미래 칸: 마지막 봉 뒤로 빈 봉(시각만 있는 점)을 FUTURE개 놓아 시간 축 글자와 세로 격자가 미래에도 보이게 한다.
+// 값이 없는 보이지 않는 계열에 두어 캔들 계열의 update(실시간 봉)는 그대로 쓴다. 일봉은 평일만, 분봉은 봉 간격대로(CME 쉬는 시간도 그냥 이어서)
+const FUTURE = 300;
+const futureSeries = chart.addLineSeries({ color: 'transparent', priceScaleId: 'future', priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+function renderFuture(fresh) {
+  const bars = state.bars;
+  if (!bars.length) { futureSeries.setData([]); state.future = []; return; }
+  const last = bars[bars.length - 1].time;
+  const f = state.future || [];
+  if (!fresh && f.length > FUTURE / 2 && f[0] > last) return;  // 아직 넉넉하다(새 봉이 미래 칸을 하나씩 채운다)
+  const out = [];
+  for (let t = last + barStep(); out.length < FUTURE; t += barStep()) {
+    if (state.interval === 'D' && [0, 6].includes(new Date(t * 1000).getUTCDay())) continue;
+    out.push(t);
+  }
+  state.future = out;
+  futureSeries.setData(out.map((t) => ({ time: t + TZ })));
+}
+
 async function loadBars(fresh) {
   const gen = state.generation;
   const whole = fresh || state.last == null;
@@ -87,7 +106,8 @@ async function loadBars(fresh) {
   if (whole) {
     series.setData(d.bars.map(shifted));
     state.bars = d.bars;
-    chart.timeScale().scrollToRealTime();
+    renderFuture(true);
+    chart.timeScale().scrollToRealTime();  // 기준은 값이 있는 마지막 봉이라 미래 칸이 있어도 지금 봉 오른쪽에 rightOffset(8칸)만 보인다
   } else {
     d.bars.forEach((b) => {
       series.update(shifted(b));
@@ -97,6 +117,7 @@ async function loadBars(fresh) {
     });
   }
   state.last = state.bars.length ? state.bars[state.bars.length - 1].time : null;
+  if (!whole) renderFuture(false);
   $('chart-msg').hidden = d.bars.length > 0;
   renderQuote();
   renderMarkers();
@@ -199,7 +220,13 @@ function timeX(t) {
   const bars = state.bars;
   if (!bars.length) return null;
   const last = bars.length - 1;
-  if (t > bars[last].time) return chart.timeScale().logicalToCoordinate(last + Math.floor((t - bars[last].time) / barStep()));
+  if (t > bars[last].time) {
+    // 미래 칸(renderFuture)에서 그 시각이 든 칸. 일봉은 주말이 빠져 봉 간격으로 셀 수 없다. 미래 칸 밖이면 봉 간격으로 늘린다
+    const f = state.future || [];
+    let k = 0;
+    while (k < f.length && f[k] <= t) k++;
+    return chart.timeScale().logicalToCoordinate(last + (k && k < f.length ? k : Math.floor((t - bars[last].time) / barStep())));
+  }
   let lo = 0, hi = last;
   while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (bars[mid].time <= t) lo = mid; else hi = mid - 1; }
   return chart.timeScale().logicalToCoordinate(lo);
@@ -207,7 +234,8 @@ function timeX(t) {
 function pointAt(p) {
   if (!p || !p.point || !state.bars.length) return null;
   const last = state.bars.length - 1, i = Math.max(0, Math.round(chart.timeScale().coordinateToLogical(p.point.x)));
-  const time = i > last ? state.bars[last].time + (i - last) * barStep() : state.bars[i].time;  // 실시간 봉 오른쪽 빈 곳도 고를 수 있게
+  const f = state.future || [];
+  const time = i <= last ? state.bars[i].time : f[i - last - 1] || state.bars[last].time + (i - last) * barStep();  // 실시간 봉 오른쪽 빈 곳(미래 칸)도 고를 수 있게
   const price = series.coordinateToPrice(p.point.y);
   return price == null ? null : { time, price: Math.round(price * 4) / 4 };  // 0.25틱에 맞춘다
 }
@@ -223,7 +251,8 @@ function renderDrawings() {
   });
   // 박스: 그리기 층(SVG)에. 그리는 중이면 커서까지 미리 보여 준다
   const boxes = draw.items.filter((d) => d.type === 'box');
-  if (draw.start && draw.hover) boxes.push({ a: draw.start, b: draw.hover, preview: true });
+  const trends = draw.items.filter((d) => d.type === 'trend');
+  if (draw.start && draw.hover) (draw.tool === 'trend' ? trends : boxes).push({ a: draw.start, b: draw.hover, preview: true });
   const color = token('--accent');
   $('draw').innerHTML = renderCloud(chart.timeScale().width()) + renderZones() + boxes.map((d) => {
     const r = boxRect(d);
@@ -231,7 +260,21 @@ function renderDrawings() {
     const on = d === draw.selected;
     return `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="${color}" fill-opacity="${d.preview ? 0.03 : on ? 0.12 : 0.06}" stroke="${color}" stroke-width="${on ? 2 : 1}"${d.preview || on ? ' stroke-dasharray="4 3"' : ''}/>`
       + (on ? boxCorners(d).map((c) => `<rect x="${c.x - 4}" y="${c.y - 4}" width="8" height="8" fill="${token('--panel')}" stroke="${color}" stroke-width="2"/>`).join('') : '');
-  }).join('') + renderMeasure() + renderOrderTags();
+  }).join('') + trends.map((d) => renderTrend(d, color)).join('') + renderMeasure() + renderOrderTags();
+}
+// 추세선: 두 점을 잇는 선. 고르면 굵은 점선과 양 끝 손잡이(boxCorners와 같은 꼴이라 같은 끌기로 옮긴다)
+function renderTrend(d, color) {
+  const [p, q] = trendEnds(d);
+  if (!p || !q) return '';
+  const on = d === draw.selected;
+  return `<line x1="${p.x}" y1="${p.y}" x2="${q.x}" y2="${q.y}" stroke="${color}" stroke-width="${on ? 2.5 : 1.5}"${d.preview || on ? ' stroke-dasharray="5 3"' : ''}/>`
+    + (on ? [p, q].map((c) => `<circle cx="${c.x}" cy="${c.y}" r="5" fill="${token('--panel')}" stroke="${color}" stroke-width="2"/>`).join('') : '');
+}
+function trendEnds(d) {
+  return ['a', 'b'].map((k) => {
+    const x = timeX(d[k].time), y = series.priceToCoordinate(d[k].price);
+    return x == null || y == null ? null : { x, y, tk: k, pk: k };
+  });
 }
 // Shift + 드래그 재기: 끈 높이(가격 차)가 지금 가격의 몇 %인가. 위로 끌면 롱, 아래로 끌면 숏으로 그만큼 움직였을 때
 function renderMeasure() {
@@ -296,6 +339,11 @@ function hitTest(pt) {
     if (d.type === 'hline') {
       const y = series.priceToCoordinate(d.price);
       if (y != null && Math.abs(y - pt.y) <= 5) return d;
+    } else if (d.type === 'trend') {
+      const [p, q] = trendEnds(d);  // 선분까지의 거리 5px 안
+      if (!p || !q) continue;
+      const dx = q.x - p.x, dy = q.y - p.y, k = Math.max(0, Math.min(1, ((pt.x - p.x) * dx + (pt.y - p.y) * dy) / (dx * dx + dy * dy || 1)));
+      if (Math.hypot(pt.x - (p.x + k * dx), pt.y - (p.y + k * dy)) <= 5) return d;
     } else {
       const r = boxRect(d);
       if (r && pt.x >= r.x - 4 && pt.x <= r.x + r.w + 4 && pt.y >= r.y - 4 && pt.y <= r.y + r.h + 4) return d;
@@ -373,7 +421,7 @@ $('tools').addEventListener('click', async (e) => {
   } else if (b.dataset.tool === 'clear') {
     // 고른 것이 있으면 그것만, 없으면 한 번 묻고 모두
     if (draw.selected) removeSelected();
-    else if (draw.items.length && await ask('고른 것이 없습니다. 그린 수평선과 박스를 모두 지울까요?', '모두 지우기')) {
+    else if (draw.items.length && await ask('고른 것이 없습니다. 그린 수평선·추세선·박스를 모두 지울까요?', '모두 지우기')) {
       draw.items = [];
       keep('mnqDraw', draw.items);
       setTool(null);
@@ -405,8 +453,8 @@ document.addEventListener('keydown', (e) => {
   // 고른 박스의 모서리 손잡이(6px 안)
   const corner = (e) => {
     const d = draw.selected, r = $('chart').getBoundingClientRect();
-    if (!d || d.type !== 'box') return null;
-    const c = boxCorners(d).find((c) => Math.abs(c.x - (e.clientX - r.left)) <= 6 && Math.abs(c.y - (e.clientY - r.top)) <= 6);
+    if (!d || (d.type !== 'box' && d.type !== 'trend')) return null;
+    const c = (d.type === 'trend' ? trendEnds(d).filter(Boolean) : boxCorners(d)).find((c) => Math.abs(c.x - (e.clientX - r.left)) <= 6 && Math.abs(c.y - (e.clientY - r.top)) <= 6);
     return c ? { d, ...c } : null;
   };
   wrap.addEventListener('pointermove', (e) => { if (!dragging) wrap.style.cursor = corner(e) ? 'nwse-resize' : wrap.style.cursor === 'nwse-resize' ? '' : wrap.style.cursor; });
@@ -506,7 +554,8 @@ function renderOrderTags() {
 (function () {
   const wrap = $('chart-wrap');
   const yOf = (e) => e.clientY - $('chart').getBoundingClientRect().top;
-  const near = (e) => {  // 마우스가 위아래 6px 안에 있는 주문 선
+  const near = (e) => {  // 마우스가 위아래 6px 안에 있는 주문 선(우클릭 메뉴 위는 빼서 정리 비율 막대를 끌 수 있게)
+    if (e.target.closest && e.target.closest('#ctx-menu')) return null;
     for (const [n, v] of orderLines) {
       const y = series.priceToCoordinate(v.order.price);
       if (y != null && Math.abs(y - yOf(e)) <= 6) return { number: n, order: v.order };
@@ -570,26 +619,54 @@ function renderOrderTags() {
     const pos = account && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
     menu.innerHTML = `<button role="menuitem" data-pick="buy">지정가 매수 ${n}계약 @ ${fmtPrice(price)}</button>`
       + `<button role="menuitem" data-pick="sell">지정가 매도 ${n}계약 @ ${fmtPrice(price)}</button>`
-      + (pos ? `<button role="menuitem" data-pick="close">지정가 정리 @ ${fmtPrice(price)}</button>` : '');
+      + (pos ? `<label class="ctx-part">정리 비율 <input type="range" min="10" max="100" step="10" value="100" aria-label="정리 비율"><output></output></label>`
+        + `<button role="menuitem" data-pick="close"></button><button role="menuitem" data-pick="market"></button>` : '');
     menu.dataset.price = price;
+    if (pos) partLabel(pos);
     const box = wrap.getBoundingClientRect();
     menu.hidden = false;
     menu.style.left = Math.min(e.clientX - box.left, box.width - menu.offsetWidth - 4) + 'px';
     menu.style.top = Math.min(e.clientY - box.top, box.height - menu.offsetHeight - 4) + 'px';
     menu.querySelector('button').focus();
   });
+  // 정리 비율 막대: 포지션의 몇 %를 닫을지(반올림, 최소 1계약). 버튼 글자에 계약 수를 바로 보인다
+  const partCount = (pos) => Math.max(1, Math.round(Math.abs(pos.qty) * Number(menu.querySelector('.ctx-part input').value) / 100));
+  function partLabel(pos) {
+    const k = partCount(pos), all = k >= Math.abs(pos.qty);
+    menu.querySelector('.ctx-part output').textContent = `${menu.querySelector('.ctx-part input').value}% · ${k} / ${Math.abs(pos.qty)}계약`;
+    menu.querySelector('[data-pick="close"]').textContent = `지정가 ${all ? '정리' : `분할 정리 ${k}계약`} @ ${fmtPrice(Number(menu.dataset.price))}`;
+    menu.querySelector('[data-pick="market"]').textContent = `시장가 ${all ? '정리' : `분할 정리 ${k}계약`}`;
+  }
+  const menuPos = () => account && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
+  menu.addEventListener('input', () => { const pos = menuPos(); if (pos) partLabel(pos); });
   menu.addEventListener('click', (e) => {
     const b = e.target.closest('[data-pick]');
     if (!b) return;
     hide();
     $('limit-price').value = menu.dataset.price;
-    ({ buy: $('limit-open').querySelector('.buy'), sell: $('limit-open').querySelector('.sell'), close: $('limit-btn') })[b.dataset.pick].click();
+    const pos = menuPos(), k = pos ? partCount(pos) : null;
+    if (b.dataset.pick === 'close') return limitClose(k);
+    if (b.dataset.pick === 'market') return marketReduce(k);
+    ({ buy: $('limit-open').querySelector('.buy'), sell: $('limit-open').querySelector('.sell') })[b.dataset.pick].click();
   });
   document.addEventListener('pointerdown', (e) => { if (!menu.contains(e.target)) hide(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
 })();
 
-chart.subscribeClick((p) => {
+// 차트 누르기: 도구가 있으면 그리기, 없으면 고르기. 차트 라이브러리의 subscribeClick은 두 번째 누르기를 가끔 빠뜨려(10-19, 추세선 두 점)
+// 직접 받는다. 끌어서 차트를 옮긴 것(4px 넘게 움직임)은 누르기로 치지 않는다
+(function () {
+  const wrap = $('chart-wrap');
+  let down = null;
+  wrap.addEventListener('pointerdown', (e) => { down = e.button === 0 ? { x: e.clientX, y: e.clientY } : null; }, true);
+  wrap.addEventListener('click', (e) => {
+    if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4 || e.target.closest('#tools, #ctx-menu, #legend')) return;
+    const r = $('chart').getBoundingClientRect();
+    if (e.clientX > r.left + chart.timeScale().width()) return;  // 가격 축
+    chartClick({ point: { x: e.clientX - r.left, y: e.clientY - r.top } });
+  });
+})();
+function chartClick(p) {
   if (!draw.tool) {
     select(hitTest(p.point));  // 도구가 꺼져 있으면 누른 것을 고른다(빈 곳이면 고르기 풀기)
     return;
@@ -602,11 +679,11 @@ chart.subscribeClick((p) => {
     draw.start = at;
     return;
   } else {
-    draw.items.push({ type: 'box', a: draw.start, b: at });
+    draw.items.push({ type: draw.tool === 'trend' ? 'trend' : 'box', a: draw.start, b: at });
   }
   keep('mnqDraw', draw.items);
   setTool(null);
-});
+}
 chart.subscribeCrosshairMove((p) => {
   draw.mouse = pointAt(p);  // Alt + H가 쓸 마우스 자리
   if (!draw.start) return;
@@ -977,23 +1054,42 @@ $('size').addEventListener('input', renderSize);
 
 $('account-flat').addEventListener('click', () => $('trade-buttons').querySelector('[data-flatten]').click());  // 같은 확인 창·같은 주문
 
-// 지정가 정리: 지금 포지션 전부를 적은 가격의 지정가 한 건으로. 체결될 때까지는 주문 칸에 미체결로 남고 거기서 취소한다
-$('limit-btn').addEventListener('click', async () => {
-  const p = account && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
-  if (!p) return notice('정리할 포지션이 없습니다.');
+// 분할 정리: 포지션의 k계약 몫(손익·수수료·증거금을 계약 수 비율로 나눔). k가 전부면 그대로
+const partOf = (p, k) => (k == null || k >= Math.abs(p.qty) ? p : { ...p, qty: Math.sign(p.qty) * k, pnl: p.pnl * k / Math.abs(p.qty), margin: p.margin && p.margin * k / Math.abs(p.qty) });
+// 지정가 정리: 지금 포지션 전부(k면 k계약만)를 적은 가격의 지정가 한 건으로. 체결될 때까지는 주문 칸에 미체결로 남고 거기서 취소한다
+async function limitClose(k) {
+  const p0 = account && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
+  if (!p0) return notice('정리할 포지션이 없습니다.');
+  const p = partOf(p0, k), part = p !== p0;
   const price = Number($('limit-price').value);
   if (!(price > 0) || Math.round(price * 4) !== price * 4) return notice('가격은 0.25 단위로 적어 주세요.');
   const side = p.qty > 0 ? '매도' : '매수', worse = p.qty > 0 ? price < p.price : price > p.price;
-  if (!await ask(`${side} ${Math.abs(p.qty)}계약 지정가 ${fmtPrice(price)}`
+  if (!await ask(`${side} ${Math.abs(p.qty)}계약 지정가 ${fmtPrice(price)}${part ? ` (${Math.abs(p0.qty)}계약 중 분할 정리)` : ''}`
     + (worse ? '\n※ 지금 가격보다 불리한 가격이라 바로 체결될 수 있습니다' : '\n가격이 여기에 닿아야 체결됩니다') + '\n\n'
-    + `체결되면\n${closeEstimate(p, price).text}\n\n자동 주문은 꺼집니다(켜 두면 체결 뒤 목표 계약 수로 다시 들기 때문).`, '지정가 정리')) return;
+    + `체결되면\n${closeEstimate(p, price).text}\n\n자동 주문은 꺼집니다(켜 두면 체결 뒤 목표 계약 수로 다시 들기 때문).`, part ? '지정가 분할 정리' : '지정가 정리')) return;
   try {
-    await sending($('limit-btn'), () => post('/api/live/limit', { price }));
+    await sending($('limit-btn'), () => post('/api/live/limit', part ? { price, reduce: k } : { price }));
   } catch (err) {
     notice('주문하지 못했습니다: ' + err.message);
   }
   afterOrder();
-});
+}
+$('limit-btn').addEventListener('click', () => limitClose());
+// 시장가 분할 정리: k계약만 바로 닫는다(전부면 '전부 정리'와 같은 주문). 수량은 서버가 주문 직전 포지션으로 다시 확인해 뒤집히지 않는다
+async function marketReduce(k) {
+  const p0 = account && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
+  if (!p0) return notice('정리할 포지션이 없습니다.');
+  if (k >= Math.abs(p0.qty)) return $('trade-buttons').querySelector('[data-flatten]').click();
+  const p = partOf(p0, k);
+  if (!await ask(`시장가 ${p.qty > 0 ? '매도' : '매수'} ${k}계약 (${Math.abs(p0.qty)}계약 중 분할 정리)\n\n${closeEstimate(p).text}\n\n`
+    + '자동 주문은 꺼집니다(켜 두면 30초 뒤 목표 계약 수로 되돌리기 때문).', '시장가 분할 정리')) return;
+  try {
+    await post('/api/live/order', { reduce: k });
+  } catch (err) {
+    notice('주문하지 못했습니다: ' + err.message);
+  }
+  afterOrder();
+}
 // 지정가 진입: 가격 칸의 가격에 비중 막대의 계약 수만큼. 반대 포지션이 있으면 체결될 때 그만큼 상계된다
 $('limit-open').addEventListener('click', async (e) => {
   const b = e.target.closest('[data-side]');  // 같은 줄의 지정가 정리 버튼은 따로 받는다
