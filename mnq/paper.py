@@ -193,6 +193,15 @@ def _scalp(key, acct, ny, price, now):
     가상 체결은 그 순간의 가격이라 익절·손절 가격과 조금 다르다."""
     cfg = config.CANDIDATES[key]["scalp"]
     held = acct.get("parts", {}).get("scalp", 0)
+    if cfg.get("kind") == "macd_mtf":  # 세션 없이 CME 장중 내내. 60분봉 MACD에 하루치 이상이 필요해 차트와 같은 쌓아 둔 1분봉을 쓴다
+        frame = strategies.minute_history()
+        trades = strategies.minute_trades(frame, cfg, since=frame.index[-1] - pd.Timedelta(hours=2))
+        last = trades[-1] if trades else None
+        want = last["side"] if last and last["t_out"] is None else 0
+        if want != held:
+            why = last["why_in"] if want else f"{last['why']} ({last['exit']:,.2f})" if last and last["t_out"] is not None else "정리"
+            _set(key, acct, "scalp", want, price, now, {"date": f"{ny:%Y-%m-%d}", "expo": float(want), "why": why})
+        return
     a, b = cfg["kst"]
     kst = datetime.now(KST)
     m = kst.hour * 60 + kst.minute
@@ -322,7 +331,7 @@ def get_trading():
                 noise = bands(cand["intraday"]["k"])
             except Exception as e:  # 설명용이라 실패해도 화면은 그대로
                 log.warning("장중 경계 계산 실패: %s", e)
-        out.append({"key": key, "name": cand["name"], "rule": cand["rule"], "scalp": "scalp" in cand, "hourly": bool(cand.get("ichimoku")), "equity": equity, "contracts": acct.get("contracts", 0), "entry": acct.get("entry"),
+        out.append({"key": key, "name": cand["name"], "rule": cand["rule"], "scalp": "scalp" in cand, "mtf": cand.get("scalp", {}).get("kind") == "macd_mtf", "hourly": bool(cand.get("ichimoku")), "equity": equity, "contracts": acct.get("contracts", 0), "entry": acct.get("entry"),
                     "parts": acct.get("parts"), "next_intraday": _next_intraday() if "intraday" in cand else None,
                     "started": acct.get("started"), "trades": acct.get("trades", [])[::-1][:50], "explain": bt["explain"][key], "noise": noise,
                     "exit": _exits(cand, acct.get("parts") or {}, bt["close"][0], bt["left"][key]),

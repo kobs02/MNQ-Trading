@@ -54,9 +54,15 @@ def api_signals():
     return jsonify(chart.signals())
 
 
+@app.get("/api/macd_mtf")
+def api_macd_mtf():
+    return jsonify(chart.macd_mtf())
+
+
 @app.get("/api/replay")
 def api_replay():
-    return jsonify(chart.replay())
+    data, key = chart.replay(), request.args.get("key")  # key: 그 후보만(스캘핑은 1분마다 새로 받으므로 가볍게)
+    return jsonify({key: data.get(key, [])} if key else data)
 
 
 @app.get("/api/live")
@@ -89,7 +95,8 @@ def api_live_order():
 
 @app.post("/api/live/limit")
 def api_live_limit():
-    return jsonify(live.limit_close(_json().get("price")))
+    body = _json()
+    return jsonify(live.limit_close(body.get("price"), body.get("qty")))
 
 
 @app.post("/api/live/modify")

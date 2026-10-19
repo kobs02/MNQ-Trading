@@ -193,19 +193,23 @@ const keep = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } cat
 const draw = { tool: null, start: null, hover: null, mouse: null, ichi: null, selected: null, items: load('mnqDraw', []), studies: load('mnqStudies', { macd: false, rsi: false, ichimoku: false }) };
 const hlines = new Map();  // 수평선 항목 → 가격선 객체
 
-// 시각 → 지금 봉 단위에서 그 시각이 들어가는 봉의 x 좌표(봉 사이 시각도 그 봉으로)
+// 시각 → 지금 봉 단위에서 그 시각이 들어가는 봉의 x 좌표(봉 사이 시각도 그 봉으로). 마지막 봉 뒤(미래)는 봉 간격으로 늘려 잡는다
+const barStep = () => (state.interval === 'D' ? 86400 : state.interval * 60);
 function timeX(t) {
   const bars = state.bars;
   if (!bars.length) return null;
-  let lo = 0, hi = bars.length - 1;
+  const last = bars.length - 1;
+  if (t > bars[last].time) return chart.timeScale().logicalToCoordinate(last + Math.floor((t - bars[last].time) / barStep()));
+  let lo = 0, hi = last;
   while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (bars[mid].time <= t) lo = mid; else hi = mid - 1; }
   return chart.timeScale().logicalToCoordinate(lo);
 }
 function pointAt(p) {
   if (!p || !p.point || !state.bars.length) return null;
-  const i = Math.max(0, Math.min(state.bars.length - 1, Math.round(chart.timeScale().coordinateToLogical(p.point.x))));
+  const last = state.bars.length - 1, i = Math.max(0, Math.round(chart.timeScale().coordinateToLogical(p.point.x)));
+  const time = i > last ? state.bars[last].time + (i - last) * barStep() : state.bars[i].time;  // 실시간 봉 오른쪽 빈 곳도 고를 수 있게
   const price = series.coordinateToPrice(p.point.y);
-  return price == null ? null : { time: state.bars[i].time, price: Math.round(price * 4) / 4 };  // 0.25틱에 맞춘다
+  return price == null ? null : { time, price: Math.round(price * 4) / 4 };  // 0.25틱에 맞춘다
 }
 
 function renderDrawings() {
@@ -221,11 +225,58 @@ function renderDrawings() {
   const boxes = draw.items.filter((d) => d.type === 'box');
   if (draw.start && draw.hover) boxes.push({ a: draw.start, b: draw.hover, preview: true });
   const color = token('--accent');
-  $('draw').innerHTML = renderCloud(chart.timeScale().width()) + boxes.map((d) => {
+  $('draw').innerHTML = renderCloud(chart.timeScale().width()) + renderZones() + boxes.map((d) => {
     const r = boxRect(d);
     if (!r) return '';
     const on = d === draw.selected;
-    return `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="${color}" fill-opacity="${d.preview ? 0.03 : on ? 0.12 : 0.06}" stroke="${color}" stroke-width="${on ? 2 : 1}"${d.preview || on ? ' stroke-dasharray="4 3"' : ''}/>`;
+    return `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="${color}" fill-opacity="${d.preview ? 0.03 : on ? 0.12 : 0.06}" stroke="${color}" stroke-width="${on ? 2 : 1}"${d.preview || on ? ' stroke-dasharray="4 3"' : ''}/>`
+      + (on ? boxCorners(d).map((c) => `<rect x="${c.x - 4}" y="${c.y - 4}" width="8" height="8" fill="${token('--panel')}" stroke="${color}" stroke-width="2"/>`).join('') : '');
+  }).join('') + renderMeasure() + renderOrderTags();
+}
+// Shift + 드래그 재기: 끈 높이(가격 차)가 지금 가격의 몇 %인가. 위로 끌면 롱, 아래로 끌면 숏으로 그만큼 움직였을 때
+function renderMeasure() {
+  const m = draw.measure, now = state.quote ? state.quote.price : null;
+  if (!m || !now) return '';
+  const x1 = timeX(m.a.time), x2 = timeX(m.b.time), y1 = series.priceToCoordinate(m.a.price), y2 = series.priceToCoordinate(m.b.price);
+  if ([x1, x2, y1, y2].some((v) => v == null)) return '';
+  const diff = m.b.price - m.a.price, up = diff >= 0, color = up ? UP : DOWN;
+  const usd = Math.abs(diff) * (state.trading ? state.trading.multiplier : 2);
+  const label = `${up ? '▲ 롱' : '▼ 숏'} ${fmtSigned(Math.abs(diff) / now, 2).replace('+', up ? '+' : '-')} · ${up ? '+' : '-'}${Math.abs(diff).toFixed(2)}pt · 1계약 $${usd.toLocaleString('en-US')}`;
+  const x = Math.min(x1, x2), w = Math.max(2, Math.abs(x2 - x1)), ty = up ? Math.min(y1, y2) - 8 : Math.max(y1, y2) + 18;
+  return `<rect x="${x}" y="${Math.min(y1, y2)}" width="${w}" height="${Math.max(1, Math.abs(y2 - y1))}" fill="${color}" fill-opacity="0.15" stroke="${color}"/>`
+    + `<line x1="${x2}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"/>`
+    + `<text x="${x + w / 2}" y="${ty}" text-anchor="middle" fill="${color}" font-size="13" font-weight="700" paint-order="stroke" stroke="${token('--bg')}" stroke-width="4">${label}</text>`;
+}
+// 박스의 네 모서리(고른 박스의 크기 조절 손잡이): 화면 좌표와, 그 모서리가 a·b 중 어느 시각·가격인지
+function boxCorners(d) {
+  const x = { a: timeX(d.a.time), b: timeX(d.b.time) }, y = { a: series.priceToCoordinate(d.a.price), b: series.priceToCoordinate(d.b.price) };
+  return ['a', 'b'].flatMap((tk) => ['a', 'b'].map((pk) => ({ x: x[tk], y: y[pk], tk, pk }))).filter((c) => c.x != null && c.y != null);
+}
+
+// 차트에 그릴 과거 시험 매매. 스캘핑은 하루 50번쯤 드나들어 5분봉 이상에서는 봉을 덮으므로 마지막 세션(한국 08:00 ~)만 그린다
+function scalpShown(c) {
+  const all = (state.replay || {})[c.key] || [];
+  if (!c.scalp || state.interval <= 1 || !all.length) return all;
+  const KST = 9 * 3600, start = Math.floor((all[all.length - 1].time + KST) / 86400) * 86400 - KST + 8 * 3600;
+  return all.filter((t) => t.time >= start);
+}
+
+// 스캘핑 추천 구간: 진입 봉 ~ 청산 봉, 진입가 ~ 청산가(아직 들고 있으면 지금 봉·지금 가격까지 점선). 롱 초록, 숏 빨강
+function renderZones() {
+  const zones = state.zones || [], width = chart.timeScale().width(), last = state.bars[state.bars.length - 1];
+  if (!zones.length || !last) return '';
+  const step = state.interval * 60;
+  return zones.map((z) => {
+    const open = z.t2 == null;
+    // state.bars는 실제 유닉스 시각(차트에 넘길 때만 TZ를 더한다)이라 여기서는 TZ를 더하지 않는다
+    const t2 = open ? last.time : Math.floor(z.t2 / step) * step, p2 = open ? (state.quote ? state.quote.price : last.close) : z.p2;
+    let x1 = timeX(Math.floor(z.t1 / step) * step), x2 = timeX(t2);
+    const y1 = series.priceToCoordinate(z.p1), y2 = series.priceToCoordinate(p2);
+    if ([x1, x2, y1, y2].some((v) => v == null) || x2 < 0 || x1 > width) return '';
+    const bar = chart.timeScale().options().barSpacing;
+    x1 -= bar / 2; x2 += bar / 2;  // 봉의 가운데가 아니라 봉 전체를 덮게
+    const color = z.side > 0 ? UP : DOWN, h = Math.max(3, Math.abs(y2 - y1)), y = Math.min(y1, y2) - (h === 3 ? 1 : 0);
+    return `<rect x="${x1}" y="${y}" width="${Math.max(2, x2 - x1)}" height="${h}" fill="${color}" fill-opacity="${open ? 0.25 : 0.14}" stroke="${color}" stroke-opacity="0.7"${open ? ' stroke-dasharray="3 2"' : ''}/>`;
   }).join('');
 }
 
@@ -343,7 +394,7 @@ document.addEventListener('keydown', (e) => {
     addItem({ type: 'hline', price: draw.mouse.price });
   }
 });
-// Shift + 드래그: 드래그한 자리에 박스. 그동안은 차트가 끌려 움직이지 않게 이벤트를 차트에 넘기지 않는다
+// Ctrl + 드래그: 드래그한 자리에 박스. Shift + 드래그: 재기(놓아도 남고, 다음에 누르면 사라진다). 그동안은 차트가 끌려 움직이지 않게 이벤트를 차트에 넘기지 않는다
 (function () {
   const wrap = $('chart-wrap');
   let dragging = false;
@@ -351,16 +402,56 @@ document.addEventListener('keydown', (e) => {
     const r = $('chart').getBoundingClientRect();
     return pointAt({ point: { x: e.clientX - r.left, y: e.clientY - r.top } });
   };
+  // 고른 박스의 모서리 손잡이(6px 안)
+  const corner = (e) => {
+    const d = draw.selected, r = $('chart').getBoundingClientRect();
+    if (!d || d.type !== 'box') return null;
+    const c = boxCorners(d).find((c) => Math.abs(c.x - (e.clientX - r.left)) <= 6 && Math.abs(c.y - (e.clientY - r.top)) <= 6);
+    return c ? { d, ...c } : null;
+  };
+  wrap.addEventListener('pointermove', (e) => { if (!dragging) wrap.style.cursor = corner(e) ? 'nwse-resize' : wrap.style.cursor === 'nwse-resize' ? '' : wrap.style.cursor; });
+  // 모서리를 끌면 크기 조절: 그 모서리의 시각과 가격만 옮긴다(맞은편 모서리는 그대로)
   wrap.addEventListener('pointerdown', (e) => {
-    if (!e.shiftKey || e.button !== 0) return;
+    const c = e.button === 0 && !e.shiftKey && !e.ctrlKey && corner(e);
+    if (!c) return;
+    e.stopPropagation();
+    e.preventDefault();
+    dragging = true;
+    try { wrap.setPointerCapture(e.pointerId); } catch (err) { /* 잡지 못해도 차트 안에서는 그대로 끌린다 */ }
+    const move = (ev) => {
+      ev.stopPropagation();
+      const p = at(ev);
+      if (!p) return;
+      c.d[c.tk] = { ...c.d[c.tk], time: p.time };
+      c.d[c.pk] = { ...c.d[c.pk], price: p.price };
+      renderDrawings();
+    };
+    wrap.addEventListener('pointermove', move, true);
+    wrap.addEventListener('pointerup', (ev) => {
+      ev.stopPropagation();
+      wrap.removeEventListener('pointermove', move, true);
+      dragging = false;
+      keep('mnqDraw', draw.items);
+    }, { capture: true, once: true });
+  }, true);
+  wrap.addEventListener('pointerdown', (e) => {
+    if (draw.measure) { draw.measure = null; renderDrawings(); }
+    if (!(e.ctrlKey || e.shiftKey) || e.button !== 0) return;
     const start = at(e);
     if (!start) return;
     e.stopPropagation();
     e.preventDefault();
     dragging = true;
+    try { wrap.setPointerCapture(e.pointerId); } catch (err) { /* 잡지 못해도 차트 안에서는 그대로 그려진다 */ }
+    if (!e.ctrlKey) {  // Shift: 재기
+      draw.measure = { a: start, b: start };
+      const move = (ev) => { ev.stopPropagation(); draw.measure.b = at(ev) || draw.measure.b; renderDrawings(); };
+      wrap.addEventListener('pointermove', move, true);
+      wrap.addEventListener('pointerup', (ev) => { ev.stopPropagation(); wrap.removeEventListener('pointermove', move, true); dragging = false; }, { capture: true, once: true });
+      return;
+    }
     draw.start = start;
     draw.hover = start;
-    try { wrap.setPointerCapture(e.pointerId); } catch (err) { /* 잡지 못해도 차트 안에서는 그대로 그려진다 */ }
     const move = (ev) => { ev.stopPropagation(); draw.hover = at(ev) || draw.hover; renderDrawings(); };
     const up = (ev) => {
       ev.stopPropagation();
@@ -374,8 +465,8 @@ document.addEventListener('keydown', (e) => {
     wrap.addEventListener('pointermove', move, true);
     wrap.addEventListener('pointerup', up, { capture: true, once: true });
   }, true);
-  // 차트 라이브러리는 마우스 이벤트로도 끌기를 하므로 Shift를 누른 동안은 그것도 막는다
-  ['mousedown', 'mousemove', 'mouseup'].forEach((t) => wrap.addEventListener(t, (e) => { if (e.shiftKey || dragging) e.stopPropagation(); }, true));
+  // 차트 라이브러리는 마우스 이벤트로도 끌기를 하므로 Ctrl·Shift를 누른 동안은 그것도 막는다
+  ['mousedown', 'mousemove', 'mouseup'].forEach((t) => wrap.addEventListener(t, (e) => { if (e.shiftKey || e.ctrlKey || dragging) e.stopPropagation(); }, true));
 })();
 // 미체결 지정가 주문: 차트에 점선으로. 선을 마우스로 끌어 놓으면 그 가격으로 정정한다(LS 정정 주문, 주문번호가 바뀐다)
 const orderLines = new Map();  // 주문번호 → { line, order }
@@ -394,11 +485,23 @@ function renderOrderLines(pending) {
   orderLines.forEach((v, n) => { if (!want.has(n)) { series.removePriceLine(v.line); orderLines.delete(n); } });
   want.forEach((o, n) => {
     if (orderDrag && orderDrag.number === n) return;  // 끄는 중에는 화면의 선을 그대로 둔다
-    const opts = { price: o.price, color: token('--accent'), lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: orderTitle(o) };
+    const opts = { price: o.price, color: o.qty > 0 ? ORDER_BUY : ORDER_SELL, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '' };
     if (orderLines.has(n)) orderLines.get(n).line.applyOptions(opts);
     else orderLines.set(n, { line: series.createPriceLine(opts), order: o });
-    orderLines.get(n).order = o;
+    Object.assign(orderLines.get(n), { order: o, price: o.price, tag: orderTitle(o) });
   });
+  renderDrawings();
+}
+// 지정가 주문 이름표(바이낸스처럼): 선 왼쪽에 흰 테두리 네모, 매수 연두 · 매도 빨강
+const ORDER_BUY = '#0ecb81', ORDER_SELL = '#f6465d';
+function renderOrderTags() {
+  return [...orderLines.values()].map((v) => {
+    const y = series.priceToCoordinate(v.price);
+    if (y == null) return '';
+    const w = [...v.tag].reduce((s, ch) => s + (ch.charCodeAt(0) > 0x2e00 ? 12 : 6.6), 16);  // 한글은 넓게 어림
+    return `<rect x="8" y="${y - 11}" width="${w}" height="22" rx="3" fill="${v.order.qty > 0 ? ORDER_BUY : ORDER_SELL}" stroke="#fff" stroke-width="1.5"/>`
+      + `<text x="16" y="${y + 4.5}" fill="#fff" font-size="12" font-weight="700">${v.tag}</text>`;
+  }).join('');
 }
 (function () {
   const wrap = $('chart-wrap');
@@ -411,7 +514,7 @@ function renderOrderLines(pending) {
     return null;
   };
   wrap.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || e.shiftKey) return;
+    if (e.button !== 0 || e.shiftKey || e.ctrlKey) return;
     const hit = near(e);
     if (!hit) return;
     e.stopPropagation();
@@ -423,7 +526,10 @@ function renderOrderLines(pending) {
       const p = series.coordinateToPrice(yOf(ev));
       if (p == null) return;
       orderDrag.price = Math.round(p * 4) / 4;
-      orderLines.get(orderDrag.number).line.applyOptions({ price: orderDrag.price, title: `→ ${fmtPrice(orderDrag.price)}${fillPnl(orderDrag.order, orderDrag.price)}` });
+      const v = orderLines.get(orderDrag.number);
+      v.line.applyOptions({ price: orderDrag.price });
+      Object.assign(v, { price: orderDrag.price, tag: `→ ${fmtPrice(orderDrag.price)}${fillPnl(orderDrag.order, orderDrag.price)}` });
+      renderDrawings();
     };
     const up = async (ev) => {
       ev.stopPropagation();
@@ -437,7 +543,8 @@ function renderOrderLines(pending) {
       if (crosses && !await ask(`지정가 ${fmtPrice(order.price)} → ${fmtPrice(price)}${fillPnl(order, price).replace(' · ', '\n')}\n지금 가격(${fmtPrice(now)})을 넘는 가격이라 바로 체결될 수 있습니다. 정정할까요?`, '지정가 정정')) return back();
       try {
         const r = await post('/api/live/modify', { number, price });
-        orderLines.get(number).line.applyOptions({ title: `정정 중 ${fmtPrice(r.price)}` });
+        Object.assign(orderLines.get(number), { price: r.price, tag: `정정 중 ${fmtPrice(r.price)}` });
+        renderDrawings();
       } catch (err) {
         notice('정정하지 못했습니다: ' + err.message);
       }
@@ -448,19 +555,38 @@ function renderOrderLines(pending) {
     wrap.addEventListener('pointerup', up, { capture: true, once: true });
   }, true);
   // 선 위에서는 위아래 화살표 커서. 끄는 동안 차트가 같이 끌리지 않게 마우스 이벤트도 막는다
-  wrap.addEventListener('pointermove', (e) => { if (!orderDrag) wrap.style.cursor = near(e) ? 'ns-resize' : ''; });
+  wrap.addEventListener('pointermove', (e) => { if (!orderDrag) wrap.style.cursor = near(e) ? 'ns-resize' : wrap.style.cursor === 'ns-resize' ? '' : wrap.style.cursor; });  // 박스 손잡이 커서는 건드리지 않는다
   ['mousedown', 'mousemove', 'mouseup'].forEach((t) => wrap.addEventListener(t, (e) => {
-    if (orderDrag || (t === 'mousedown' && e.button === 0 && !e.shiftKey && near(e))) e.stopPropagation();
+    if (orderDrag || (t === 'mousedown' && e.button === 0 && !e.shiftKey && !e.ctrlKey && near(e))) e.stopPropagation();
   }, true));
-  // 우클릭: 그 높이의 가격으로 지정가 정리(가격 칸을 채우고 지정가 정리 버튼과 같은 확인 창)
+  // 우클릭: 그 높이의 가격으로 지정가 매수·매도·정리를 고르는 작은 메뉴. 고르면 가격 칸을 채우고 오른쪽 버튼과 같은 확인 창
+  const menu = $('ctx-menu'), hide = () => { menu.hidden = true; };
   wrap.addEventListener('contextmenu', (e) => {
     const p = series.coordinateToPrice(yOf(e));
     if (p == null) return;
     e.preventDefault();
-    $('limit-price').value = Math.round(p * 4) / 4;
     if ($('limit-btn').disabled) return notice('대회 시작부터 주문할 수 있습니다.');
-    $('limit-btn').click();
+    const price = Math.round(p * 4) / 4, n = sizeContracts().n;
+    const pos = account && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
+    menu.innerHTML = `<button role="menuitem" data-pick="buy">지정가 매수 ${n}계약 @ ${fmtPrice(price)}</button>`
+      + `<button role="menuitem" data-pick="sell">지정가 매도 ${n}계약 @ ${fmtPrice(price)}</button>`
+      + (pos ? `<button role="menuitem" data-pick="close">지정가 정리 @ ${fmtPrice(price)}</button>` : '');
+    menu.dataset.price = price;
+    const box = wrap.getBoundingClientRect();
+    menu.hidden = false;
+    menu.style.left = Math.min(e.clientX - box.left, box.width - menu.offsetWidth - 4) + 'px';
+    menu.style.top = Math.min(e.clientY - box.top, box.height - menu.offsetHeight - 4) + 'px';
+    menu.querySelector('button').focus();
   });
+  menu.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-pick]');
+    if (!b) return;
+    hide();
+    $('limit-price').value = menu.dataset.price;
+    ({ buy: $('limit-open').querySelector('.buy'), sell: $('limit-open').querySelector('.sell'), close: $('limit-btn') })[b.dataset.pick].click();
+  });
+  document.addEventListener('pointerdown', (e) => { if (!menu.contains(e.target)) hide(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
 })();
 
 chart.subscribeClick((p) => {
@@ -582,13 +708,23 @@ function renderMarkers() {
     });
     markers = [...days.values()].map((s) => marker(s.time + TZ, s.from, s.to, false, s.pnl));
   } else {
-    // 분봉: 가상 계좌를 시작하기 전은 과거 시험(1시간봉으로 돌린 것), 그 뒤는 가상 계좌의 실제 매매
+    // 분봉: 가상 계좌를 시작하기 전은 과거 시험(1시간봉으로 돌린 것), 그 뒤는 가상 계좌의 실제 매매.
+    // 스캘핑은 과거 시험이 오늘 1분봉까지 이어지므로(서버가 1분마다 다시 계산) 그것만 그리고, 진입 ~ 청산을 추천 구간 상자로도 보인다
     const step = state.interval * 60;
-    const until = c.started || Infinity;
-    const past = ((state.replay || {})[c.key] || []).filter((t) => t.time < until);
-    markers = past.concat(c.trades).filter((t) => t.to !== t.from && t.time >= first)
+    const until = c.scalp ? Infinity : c.started || Infinity;
+    const past = scalpShown(c).filter((t) => t.time < until);
+    markers = past.concat(c.scalp ? [] : c.trades).filter((t) => t.to !== t.from && t.time >= first)
       .map((t) => marker(Math.floor(t.time / step) * step + TZ, t.from, t.to, true, t.pnl));
   }
+  state.zones = [];
+  if (c.scalp && state.interval !== 'D') {
+    scalpShown(c).forEach((t) => {
+      if (t.from === 0 && t.to) state.zones.push({ side: t.to, t1: t.time, p1: t.price, t2: null, p2: null });
+      else if (t.to === 0 && state.zones.length) Object.assign(state.zones[state.zones.length - 1], { t2: t.time, p2: t.price, why: t.why });
+    });
+  }
+  renderDrawings();
+  if (c.mtf && state.interval !== 'D') markers = markers.concat(mtfMarkers(first));  // 매매법 'MACD 동시 반전': 세 단계 신호
   series.setMarkers(markers.sort((a, b) => a.time - b.time));
   if (entryLine) series.removePriceLine(entryLine);
   entryLine = c.contracts && c.entry ? series.createPriceLine({
@@ -596,6 +732,49 @@ function renderMarkers() {
     axisLabelVisible: true, title: `가상 진입 ${position(c.contracts).replace(/<[^>]+>/g, '')}`,
   }) : null;
 }
+
+// MACD 동시 반전(관찰용, research/r18_macd_mtf.py 불통과): 서버가 1분봉으로 계산한 신호를 근거 세기 세 단계로.
+// 약 = 같은 방향 2개 꺾임(옅고 작은 화살표, 매매 안 함) · 중 = 3개 이상(진한 보통 화살표) · 강 = 2개 이상 + 1·5·15분 RSI 과매도·과매수(금색 큰 화살표 ★)
+// 화살표 방향과 자리: ▲ 봉 아래 = 매수, ▼ 봉 위 = 매도. 오른쪽 칸 범례(mtfLegend)와 같은 색·크기
+const MTF_GOLD = '#f0b90b';
+const MTF = {
+  1: { name: '약', size: 0.6, buy: 'rgba(38, 166, 154, .5)', sell: 'rgba(239, 83, 80, .5)' },
+  2: { name: '중', size: 1.2, buy: UP, sell: DOWN },
+  3: { name: '강', size: 2.2, buy: MTF_GOLD, sell: MTF_GOLD },
+};
+async function loadMtf() {
+  try { state.mtf = await api('/api/macd_mtf'); } catch (e) { state.mtf = []; }
+  renderMarkers();
+  if (current() && current().mtf) renderSide();  // 범례 아래 '마지막 신호'
+}
+// 봉이 클수록 한 봉에 신호가 몰려 차트를 덮으므로: 15분봉 이상은 2·3단계만, 글자는 1·5분봉에서만 길게
+function mtfMarkers(first) {
+  const step = state.interval * 60, big = state.interval >= 15;
+  return (state.mtf || []).filter((s) => s.time >= first && !(big && s.level === 1)).map((s) => {
+    const buy = s.side > 0, st = MTF[s.level];
+    const text = (s.level === 3 ? '★ ' : '') + mtfTfs(s);  // 화살표 옆 글자: 함께 꺾인 분봉만 숫자로(예: 1 / 5)
+    return {
+      time: Math.floor(s.time / step) * step + TZ, position: buy ? 'belowBar' : 'aboveBar', color: buy ? st.buy : st.sell, text,
+      shape: buy ? 'arrowUp' : 'arrowDown', size: st.size,
+    };
+  });
+}
+const mtfTfs = (s) => s.tfs.join(' / ');  // 함께 꺾인 분봉: 1 / 5, 5 / 15 / 60
+const mtfRsi = (s) => Math.round((s.side > 0 ? Math.min : Math.max)(...Object.values(s.rsi)));  // 가장 과매도(매수)·과매수(매도)인 RSI
+// 오른쪽 칸: 근거 세기 순 범례(차트와 같은 색·크기의 화살표)와 마지막 신호
+function mtfLegend() {
+  const arrow = (color, px, up) => `<svg width="${px}" height="${px}" viewBox="0 0 10 10" aria-hidden="true"><path d="${up ? 'M5 0 10 10 0 10z' : 'M0 0 10 0 5 10z'}" fill="${color}"/></svg>`;
+  const row = (lv, what, trade) => `<li><span class="mtf-icons">${arrow(MTF[lv].buy, 6 + lv * 4, true)}${arrow(MTF[lv].sell, 6 + lv * 4, false)}</span>`
+    + `<b>${lv === 3 ? '★' : ''}${MTF[lv].name}</b><span>${what}<small>${trade}</small></span></li>`;
+  const s = (state.mtf || [])[state.mtf ? state.mtf.length - 1 : 0];
+  return `<div class="why-block"><div class="why-title"><span>근거 세기 (강한 순)</span><span><small>▲ 봉 아래 = 매수 · ▼ 봉 위 = 매도</small></span></div>`
+    + `<ul class="mtf-legend">${row(3, '2개 이상 꺾임 + RSI 과매도(매수 &lt; 30)·과매수(매도 &gt; 70)', '금색 큰 화살표 · 가상 계좌 1계약')}`
+    + `${row(2, '3개 이상 같은 방향으로 꺾임', '진한 보통 화살표 · 가상 계좌 1계약')}${row(1, '2개 같은 방향으로 꺾임', '옅은 작은 화살표 · 표시만')}</ul>`
+    + '<p class="why-foot">화살표 옆 숫자는 함께 꺾인 분봉입니다(예: 1 / 5 = 1분봉과 5분봉, 60 = 1시간봉).</p>'
+    + (s ? `<p class="why-sum">마지막 신호 ${fmtTime(s.time + 60)} · <b class="${s.level === 3 ? 'mtf-gold' : tone(s.side)}">${s.level === 3 ? '★' : ''}${MTF[s.level].name} ${s.side > 0 ? '▲ 매수' : '▼ 매도'}</b> ${mtfTfs(s)}`
+      + (s.level === 3 ? ` · RSI ${mtfRsi(s)}` : '') + '</p>' : '') + '</div>';
+}
+setInterval(() => { if (current() && current().mtf) loadMtf(); }, 60000);
 
 // ---------- 오른쪽 칸 ----------
 function rows(list) {
@@ -647,9 +826,9 @@ function renderWhy(c, d) {
   } else {
     // 마지막 판단(가상 계좌의 마지막 매매 까닭)이 있으면 조건 위에
     const last = c.trades.find((t) => t.why);
-    body = whyBlock('조건', null, (last && (c.scalp || c.hourly) ? [['마지막 판단', `${fmtTime(last.time)} · ${last.why}`, null]] : []).concat(c.explain));
+    body = (c.mtf ? mtfLegend() : '') + whyBlock('조건', null, (last && (c.scalp || c.hourly) ? [['마지막 판단', `${fmtTime(last.time)} · ${last.why}`, null]] : []).concat(c.explain));
   }
-  const next = c.scalp ? '한국 평일 밤 22:30 ~ 05:00, 1분봉 마감마다' : c.hourly ? '매시 정각(1시간봉 마감마다, CME 쉬는 때 제외)' : `${c.next_intraday ? `장중 ${fmtTime(c.next_intraday)} · ` : ''}일봉 ${fmtTime(d.next_decision)}`;
+  const next = c.mtf ? 'CME 장중, 1분봉 마감마다' : c.scalp ? '한국 평일 08:00 ~ 18:00, 1분봉 마감마다' : c.hourly ? '매시 정각(1시간봉 마감마다, CME 쉬는 때 제외)' : `${c.next_intraday ? `장중 ${fmtTime(c.next_intraday)} · ` : ''}일봉 ${fmtTime(d.next_decision)}`;
   $('why').innerHTML = `<div class="why-head"><span class="pos-big">${position(c.contracts)}</span><span class="why-acct">`
     + (c.contracts && c.entry ? `진입 ${fmtPrice(c.entry)} · <b class="${tone(pnl)}">${fmtMoney(pnl)}</b><br>` : '')
     + `가상 계좌 <b class="${tone(r)}">${fmtSigned(r)}</b>`
@@ -700,12 +879,12 @@ function renderLive(d) {
   t.classList.toggle('active', d.enabled);
   t.setAttribute('aria-pressed', d.enabled);
   t.dataset.on = d.enabled;
-  $('size').max = d.max_contracts;  // 서버의 최대 계약 수(안전장치)까지만
+  state.live = d;  // 비중 막대가 1계약 증거금과 최대 계약 수를 쓴다
   renderOrderLines(d.pending);
   const n = (d.pending || []).length;
   $('cancel-pending').hidden = !n;
   $('cancel-pending').textContent = `미체결 주문 취소 (${n}건)`;
-  document.querySelectorAll('#trade-buttons button, #limit-btn, #account-flat').forEach((b) => {
+  document.querySelectorAll('#trade-buttons button, #limit-btn, #limit-open button, #account-flat').forEach((b) => {
     b.disabled = !d.started;
     b.title = d.started ? '' : '대회 시작부터 누를 수 있습니다';
   });
@@ -721,7 +900,7 @@ function renderLive(d) {
 $('trade-buttons').addEventListener('click', async (e) => {
   const b = e.target.closest('button');
   if (!b) return;
-  const flat = b.hasAttribute('data-flatten'), qty = Number(b.dataset.qty) * Number($('size').value);
+  const flat = b.hasAttribute('data-flatten'), qty = Number(b.dataset.qty) * sizeContracts().n;
   const est = flat ? (account ? account.view : []).map(closeEstimate) : [];
   if (b.hasAttribute('data-flip')) {  // 뒤집기: 계약 수는 서버가 주문 직전의 실제 포지션으로 정한다
     const p = account && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
@@ -775,12 +954,24 @@ async function cancelPending() {
 $('cancel-pending').addEventListener('click', cancelPending);
 
 // 비중 막대: 계약 수와 그 노출(계약 가치 ÷ 평가 자산). 매수·매도 버튼 글자도 같이 바꾼다
+// 잔고의 pct%를 증거금으로 쓰면 몇 계약인가: 내림, 최소 1, 서버의 최대 계약 수(안전장치)까지
+function sizeContracts() {
+  const pct = Number($('size').value), eq = account ? (account.cash ?? account.deposit) : null;
+  const margin = (state.live && state.live.contract_margin) || 4741;  // 서버가 아직 모르면 10-15에 본 개시증거금
+  const max = (state.live && state.live.max_contracts) || 1;
+  const n = eq ? Math.min(max, Math.max(1, Math.floor((pct / 100) * eq / margin))) : 1;
+  return { n, pct, eq, margin, capped: eq && Math.floor((pct / 100) * eq / margin) > max };
+}
 function renderSize() {
-  const n = Number($('size').value), q = state.quote, eq = account ? (account.cash ?? account.deposit) : null;
+  const { n, pct, eq, margin, capped } = sizeContracts(), q = state.quote;
   const expo = q && eq ? n * q.price * (state.trading ? state.trading.multiplier : 2) / eq : null;
-  $('size-out').innerHTML = `<b>${n}계약</b>` + (expo ? ` · 계좌의 ${expo.toFixed(2)}배 (지수 1% = $${Math.round(expo * eq / 100).toLocaleString('en-US')})` : '');
+  $('size-out').innerHTML = `잔고 <b>${pct}%</b> → <b>${n}계약</b> · 증거금 ${fmtMoney(n * margin, 0)}`
+    + (expo ? ` · 레버리지 <b>${expo.toFixed(1)}배</b> (지수 1% = $${Math.round(expo * eq / 100).toLocaleString('en-US')})` : '')
+    + (capped ? ' <small>(최대 계약 수에서 멈춤)</small>' : '');
   document.querySelector('#trade-buttons .buy').textContent = `매수 ${n}계약`;
   document.querySelector('#trade-buttons .sell').textContent = `매도 ${n}계약`;
+  document.querySelector('#limit-open .buy').textContent = `지정가 매수 ${n}계약`;
+  document.querySelector('#limit-open .sell').textContent = `지정가 매도 ${n}계약`;
 }
 $('size').addEventListener('input', renderSize);
 
@@ -798,6 +989,26 @@ $('limit-btn').addEventListener('click', async () => {
     + `체결되면\n${closeEstimate(p, price).text}\n\n자동 주문은 꺼집니다(켜 두면 체결 뒤 목표 계약 수로 다시 들기 때문).`, '지정가 정리')) return;
   try {
     await sending($('limit-btn'), () => post('/api/live/limit', { price }));
+  } catch (err) {
+    notice('주문하지 못했습니다: ' + err.message);
+  }
+  afterOrder();
+});
+// 지정가 진입: 가격 칸의 가격에 비중 막대의 계약 수만큼. 반대 포지션이 있으면 체결될 때 그만큼 상계된다
+$('limit-open').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-side]');  // 같은 줄의 지정가 정리 버튼은 따로 받는다
+  if (!b) return;
+  const n = sizeContracts().n, qty = Number(b.dataset.side) * n, price = Number($('limit-price').value);
+  if (!(price > 0) || Math.round(price * 4) !== price * 4) return notice('가격은 0.25 단위로 적어 주세요.');
+  const now = state.quote ? state.quote.price : null, side = qty > 0 ? '매수' : '매도';
+  const crosses = now != null && (qty > 0 ? price >= now : price <= now);
+  const p = account && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
+  if (!await ask(`지정가 ${side} ${n}계약 @ ${fmtPrice(price)}`
+    + (crosses ? `\n※ 지금 가격(${fmtPrice(now)})보다 ${qty > 0 ? '높은' : '낮은'} 가격이라 바로 체결될 수 있습니다` : '\n가격이 여기에 닿아야 체결됩니다')
+    + (p && Math.sign(p.qty) !== Math.sign(qty) ? `\n지금 ${position(p.qty).replace(/<[^>]+>/g, '')}과 상계됩니다${fillPnl({ qty }, price).replace(' · ', '\n')}` : '')
+    + `\n수수료 진입 $${(CONTEST_FEE + BROKER_FEE) * n}\n\n자동 주문은 꺼집니다(켜 두면 체결 뒤 목표 계약 수로 되돌리기 때문).`, '지정가 진입')) return;
+  try {
+    await sending(b, () => post('/api/live/limit', { price, qty }));
   } catch (err) {
     notice('주문하지 못했습니다: ' + err.message);
   }
@@ -920,6 +1131,11 @@ async function tickTrading() {
   try {
     if (!state.signals) state.signals = await api('/api/signals');
     if (!state.replay) state.replay = await api('/api/replay');
+    else if (current() && current().scalp && Date.now() - (state.scalpAt || 0) > 55000) {  // 스캘핑 추천 구간은 서버가 1분마다 새 1분봉으로 다시 계산한다
+      state.scalpAt = Date.now();
+      Object.assign(state.replay, await api('/api/replay?key=' + current().key));
+      renderMarkers();
+    }
     if (!state.dailyCloses || Date.now() - state.dailyAt > 600000) {  // 일봉 종가는 10분마다
       state.dailyAt = Date.now();
       api('/api/chart?interval=D').then((d) => { state.dailyCloses = d.bars.map((b) => b.close); renderLevels(); }).catch(() => {});
@@ -927,6 +1143,7 @@ async function tickTrading() {
     api('/api/live').then(renderLive).catch(() => {});
     state.trading = await api('/api/trading');
     renderSide();
+    if (current() && current().mtf && !state.mtf) loadMtf();  // 처음 열 때 MACD 동시 반전이 골라져 있으면
   } catch (e) { /* 다음에 다시 */ }
 }
 
@@ -953,6 +1170,7 @@ $('picks').addEventListener('click', (ev) => {
   state.candidate = item.dataset.key;
   localStorage.setItem('mnqCandidate', state.candidate);
   renderSide();
+  if (current() && current().mtf && !state.mtf) loadMtf();
 });
 
 // 차트와 오른쪽 칸 사이 손잡이: 끌거나 좌우 화살표로 오른쪽 칸 너비를 바꾼다(더블클릭하면 원래대로)

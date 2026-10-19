@@ -41,6 +41,11 @@ def explain(key, px):
         return [("롱", "구름이 초록으로 바뀜: 선행스팬 A(전환 9·기준 26 평균) > B(52봉 가운데)", None),
                 ("숏", "구름이 빨강으로 바뀜: A < B. 늘 1계약, 반전 때 롱·숏을 뒤집는다", None),
                 ("연구 결과", "2년 1시간봉: 샤프 0.04 ~ 0.21, 4주 수익+MDD가 섞기보다 나쁨 → 관찰용", False)]
+    if rule == "flat" and config.CANDIDATES[key]["scalp"].get("kind") == "macd_mtf":
+        return [("꺾임", "1·5·15·60분봉 MACD 선 기울기가 바뀐 뒤 그 방향인 동안(1분봉은 최대 5분, 5분봉 15분, 15·60분봉 60분)", None),
+                ("근거 세기", "약 = 2개 · 중 = 3개 이상 · 강 = 2개 이상 + RSI 과매도·과매수. 가상 계좌는 중·강에 1계약", None),
+                ("청산", f"{config.CANDIDATES[key]['scalp']['hold']}분 경과 · 반대 방향 2단계 이상 신호", None),
+                ("연구 결과", "18차(1분봉 5주, 비용 뒤): 무작위와 같음, RSI를 더해도 나아지지 않음 → 관찰용", False)]
     if rule == "flat":
         sc = config.CANDIDATES[key]["scalp"]
         a, b = sc["kst"]
@@ -354,12 +359,122 @@ def _ichimoku_events():
     return _with_pnl(out)
 
 
+# ---------- 여러 봉 단위 MACD 기울기 동시 반전(관찰용): research/r18_macd_mtf.py ----------
+MACD_TFS = (1, 5, 15, 60)
+
+
+def _tf_close(frame, tf):
+    return frame["close"] if tf == 1 else frame["close"].resample(f"{tf}min", label="left", closed="left").last().dropna()
+
+
+def macd_turns(frame, tf):
+    """그 봉 단위 MACD 선(EMA 12 - 26)의 기울기 꺾임(+1 위로, -1 아래로, 0 없음)과 기울기 부호. 색인은 봉이 마감된 시각."""
+    c = _tf_close(frame, tf)
+    s = (c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()).diff()
+    d = np.where((s > 0) & (s.shift() <= 0), 1, np.where((s < 0) & (s.shift() >= 0), -1, 0))
+    idx = c.index + pd.Timedelta(minutes=tf)
+    return pd.Series(d, index=idx), pd.Series(np.sign(s.to_numpy()), index=idx)
+
+
+def tf_rsi(frame, tf, n=14):
+    """그 봉 단위 RSI(와일더)를 1분봉마다(그 분이 마감된 때의 마지막 마감 봉) 맞춘 배열."""
+    c = _tf_close(frame, tf)
+    d = c.diff()
+    r = 100 - 100 / (1 + d.clip(lower=0).ewm(alpha=1 / n).mean() / (-d.clip(upper=0)).ewm(alpha=1 / n).mean())
+    r.index = r.index + pd.Timedelta(minutes=tf)
+    return r.reindex(frame.index + pd.Timedelta(minutes=1), method="ffill").to_numpy()
+
+
+# 꺾인 상태로 보는 최대 기간(분): 바로 위 단위 한 봉. 10-19 사용자 요청으로 '마지막 마감 봉이 꺾인 봉일 때만'(1분봉 꺾임은 1분만 유효해
+# 1분 17:20 · 5분 17:25 꺾임이 동시로 안 잡혔다)에서 '꺾인 뒤 기울기가 그 방향인 동안, 이 기간까지'로 바꿨다
+MACD_HOLD = {1: 5, 5: 15, 15: 60, 60: 60}
+
+
+def macd_counts(frame):
+    """1분봉마다: 지금 위로·아래로 꺾인 상태인 단위 수, 이 분에 새로 꺾인 단위가 있는가, 단위별 상태 {tf: 배열}.
+    꺾인 상태 = 그 단위의 마지막 꺾임이 MACD_HOLD 분 안이고 기울기가 아직 그 방향. 마감된 봉만 쓴다(1분봉 i는 i+1분에 마감)."""
+    close_t = frame.index + pd.Timedelta(minutes=1)
+    up = np.zeros(len(frame), int); dn = np.zeros(len(frame), int); fresh = np.zeros(len(frame), bool); each = {}
+    for tf in MACD_TFS:
+        tr, sign = macd_turns(frame, tf)
+        turns = tr[tr != 0]
+        last = turns.reindex(close_t, method="ffill").to_numpy()                      # 마지막 꺾임의 방향
+        when = pd.Series(turns.index, index=turns.index).reindex(close_t, method="ffill")  # 그 꺾임이 마감된 시각
+        age = (close_t - pd.DatetimeIndex(when)).total_seconds().to_numpy() / 60
+        now = sign.reindex(close_t, method="ffill").to_numpy()                         # 지금 기울기 부호
+        each[tf] = np.where((age <= MACD_HOLD[tf]) & (now == last), np.nan_to_num(last), 0)
+        up += each[tf] > 0; dn += each[tf] < 0
+        fresh |= pd.Series(close_t).isin(turns.index).to_numpy()
+    return up, dn, fresh, each
+
+
+def macd_mtf_events(frame, since=None):
+    """차트 표시용 신호 [{time(그 1분봉 시작, 유닉스), side, level, tfs, rsi}]. 새로 꺾인 단위가 생긴 분에만.
+    level 1: 같은 방향 2개 꺾임, 2: 3개 이상, 3: 2개 이상이면서 1·5·15분 RSI 가운데 하나가 과매도(롱 < 30)·과매수(숏 > 70).
+    shortcut: 3단계를 '3개 이상 + RSI'로 하면 5주에 한 번도 없어(r18) 2개 이상 + RSI로 했다."""
+    up, dn, fresh, each = macd_counts(frame)
+    rsi = {tf: tf_rsi(frame, tf) for tf in (1, 5, 15)}
+    t = frame.index.tz_localize("America/New_York").asi8 // 10**9
+    out = []
+    for i in np.flatnonzero(fresh & (((up >= 2) & (dn == 0)) | ((dn >= 2) & (up == 0)))):
+        side = 1 if up[i] >= 2 else -1
+        if since is not None and frame.index[i] < since:
+            continue
+        r = {tf: round(float(v[i]), 1) for tf, v in rsi.items() if not np.isnan(v[i])}
+        extreme = any(v < 30 for v in r.values()) if side > 0 else any(v > 70 for v in r.values())
+        n = int(up[i] if side > 0 else dn[i])
+        out.append({"time": int(t[i]), "side": side, "level": 3 if extreme else 2 if n >= 3 else 1,
+                    "tfs": [tf for tf in MACD_TFS if each[tf][i] == side], "rsi": r})
+    return out
+
+
+def macd_mtf_trades(frame, hold=30, since=None, **_):
+    """매매법 'MACD 동시 반전'(관찰용): 2단계 이상 신호(3개 이상 꺾임, 또는 2개 이상 + RSI 과매도·과매수)가 난 다음 1분봉 시가에 그 방향 1계약,
+    hold분 뒤 시가 또는 반대 방향 2단계 이상 신호 다음 봉 시가에 청산(반대 신호면 그 방향으로 새로 든다). 1단계는 표시만.
+    scalp_trades와 같은 꼴 [{side, t_in, entry, t_out, exit, why, why_in}], 아직 들고 있으면 t_out None."""
+    o, t = frame["open"].to_numpy(), frame.index
+    pos = {int(np.searchsorted(t, pd.Timestamp(e["time"], unit="s", tz="UTC").tz_convert("America/New_York").tz_localize(None))): e
+           for e in macd_mtf_events(frame, since=since) if e["level"] >= 2}
+    out, cur = [], None
+    for i in sorted(pos):
+        e = pos[i]
+        if i + 1 >= len(t):
+            break
+        if cur is not None and cur["t_out"] is None:
+            if t[i + 1] >= cur["t_in"] + pd.Timedelta(minutes=hold):
+                j = int(np.searchsorted(t, cur["t_in"] + pd.Timedelta(minutes=hold)))
+                cur.update(t_out=t[j], exit=float(o[j]), why=f"{hold}분 청산")
+            elif e["side"] == cur["side"]:
+                continue  # 같은 방향 신호는 그대로 든다
+            else:
+                cur.update(t_out=t[i + 1], exit=float(o[i + 1]), why="반대 신호")
+        tfs = "·".join("1h" if m == 60 else f"{m}m" for m in e["tfs"])
+        cur = {"side": e["side"], "t_in": t[i + 1], "entry": float(o[i + 1]), "t_out": None, "exit": None, "why": None,
+               "why_in": f"{'★ RSI ' if e['level'] == 3 else ''}MACD {tfs} {'위로' if e['side'] > 0 else '아래로'} 꺾임 → {'롱' if e['side'] > 0 else '숏'}"}
+        out.append(cur)
+    if cur is not None and cur["t_out"] is None:
+        j = int(np.searchsorted(t, cur["t_in"] + pd.Timedelta(minutes=hold)))
+        if j < len(t):
+            cur.update(t_out=t[j], exit=float(o[j]), why=f"{hold}분 청산")
+    return out
+
+
+def minute_trades(frame, cfg, since=None):
+    """1분봉 관찰용 매매법의 매매들: cfg(config의 'scalp')의 kind가 macd_mtf면 MACD 동시 반전, 아니면 고저 돌파 스캘핑."""
+    if cfg.get("kind") == "macd_mtf":
+        return macd_mtf_trades(frame, since=since, **cfg)
+    return scalp_trades(frame, **cfg, since=since)
+
+
 def minute_history():
     """스캘핑 과거 시험용 LS MNQ 1분봉(research/fetch_1m.py로 받은 것, 뉴욕 시각). 근월물이 되기 전 거래가 적던 날은 뺀다(r5와 같게)."""
     import glob
     df = pd.read_pickle(sorted(glob.glob(str(config.STORE / "data" / "ls_*_1m.pkl")))[-1])
-    vol = df["volume"].groupby(df.index.normalize()).sum()
-    df = df[df.index.normalize().isin(vol[vol > vol.max() * 0.2].index)]
+    # 거래일은 뉴욕 18시에 시작한다(+6시간). 자정으로 나누면 일요일 저녁(한국 월요일 07 ~ 13시)이 거래 적은 날로 빠졌다
+    day = (df.index + pd.Timedelta(hours=6)).normalize()
+    vol = df["volume"].groupby(day).sum()
+    keep = vol[vol > vol.max() * 0.2].index.union(vol.index[-1:])  # 오늘(아직 거래가 덜 쌓인 날)은 늘 넣는다
+    df = df[day.isin(keep)]
     df.index = df.index.tz_localize(None)
     return df
 
@@ -367,10 +482,10 @@ def minute_history():
 def _scalp_events(key):
     """스캘핑 과거 시험의 계약 수 변화(1계약, 차트 화살표용)."""
     out = []
-    for x in scalp_trades(minute_history(), **config.CANDIDATES[key]["scalp"]):
+    for x in minute_trades(minute_history(), config.CANDIDATES[key]["scalp"]):
         side = "롱" if x["side"] > 0 else "숏"
         out.append({"time": int(x["t_in"].tz_localize("America/New_York").timestamp()), "from": 0, "to": x["side"], "price": x["entry"],
-                    "sleeve": "scalp", "why": f"돌파 → {side}"})
+                    "sleeve": "scalp", "why": x.get("why_in") or f"돌파 → {side}"})
         if x["t_out"] is not None:
             out.append({"time": int(x["t_out"].tz_localize("America/New_York").timestamp()), "from": x["side"], "to": 0, "price": x["exit"],
                         "sleeve": "scalp", "why": x["why"]})
@@ -383,7 +498,7 @@ def backtest(key, px):
     일봉 후보는 나스닥100 지수 일봉(2000 ~), 섞기 후보는 장중 갈래 때문에 NQ=F 1시간봉(최근 2년)으로 한다. 마지막 구간이 확인용이다."""
     cand = config.CANDIDATES[key]
     if "scalp" in cand:
-        closed = [x for x in scalp_trades(minute_history(), **cand["scalp"]) if x["t_out"] is not None]
+        closed = [x for x in minute_trades(minute_history(), cand["scalp"]) if x["t_out"] is not None]
         pts = pd.Series([(x["exit"] - x["entry"]) * x["side"] for x in closed], index=[x["t_out"] for x in closed])
         cash = (pts * config.MULTIPLIER - 2 * config.FEE_PER_CONTRACT) / config.CAPITAL  # 1계약, 가상 계좌와 같은 비용(사고팔 때마다)
         pnl = cash.groupby(cash.index.normalize()).sum()

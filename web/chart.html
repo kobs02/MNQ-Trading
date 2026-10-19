@@ -37,7 +37,7 @@
         <div id="chart"></div>
         <nav id="tools" class="pill-group" aria-label="차트 도구">
           <button data-tool="hline" aria-pressed="false" title="누른 가격에 가로선 · 단축키 Alt + H: 마우스 자리에 바로">수평선</button>
-          <button data-tool="box" aria-pressed="false" title="두 번 눌러 사각형 · Shift를 누른 채 드래그해도 된다">박스</button>
+          <button data-tool="box" aria-pressed="false" title="두 번 눌러 사각형 · Ctrl을 누른 채 드래그해도 된다 (Shift + 드래그는 재기: 현재가 기준 몇 %)">박스</button>
           <button data-study="macd" aria-pressed="false" title="MACD 12, 26, 9">MACD</button>
           <button data-study="rsi" aria-pressed="false" title="RSI 14">RSI</button>
           <button data-study="ichimoku" aria-pressed="false" title="일목균형표 9, 26, 52">일목</button>
@@ -46,6 +46,7 @@
         <svg id="draw" class="draw-layer" aria-hidden="true"></svg>
         <div id="legend" class="legend"></div>
         <div id="chart-msg" class="chart-msg" role="status">차트를 불러오는 중…</div>
+        <div id="ctx-menu" class="ctx-menu" role="menu" hidden></div>
       </section>
       <!-- LS 모의계좌의 실제 자산과 포지션(바이낸스의 포지션 칸처럼) -->
       <section id="account" class="account-panel" aria-labelledby="account-title">
@@ -64,11 +65,13 @@
       <section class="card trade-card">
         <h2>주문 <small id="live-note"></small>
           <span class="card-actions"><button id="auto-toggle" class="auto-toggle" aria-pressed="false">자동 주문 꺼짐</button></span></h2>
-        <label class="live-pick">대회 매매법 <select id="live-pick" aria-label="대회 매매법"></select></label>
-        <!-- 직접 매수·매도의 계약 수(비중). 1계약 ≈ 계좌의 0.6배라 정수 계약으로만 고른다 -->
+        <div id="live-pos"></div>
+        <button id="cancel-pending" class="cancel-pending" type="button" hidden>미체결 주문 취소</button>
+        <h3 class="trade-sub">시장가</h3>
+        <!-- 직접 매수·매도의 비중: 잔고의 몇 %를 증거금으로 쓸지(코인 거래소처럼). 계약은 정수라 그 %에 들어가는 계약 수로 내린다(최소 1). 지정가 진입도 이 계약 수 -->
         <div class="size-bar">
           <label for="size">비중</label>
-          <input id="size" type="range" min="1" max="4" step="1" value="1">
+          <input id="size" type="range" min="5" max="100" step="5" value="5" aria-describedby="size-out">
           <output id="size-out" for="size"></output>
         </div>
         <div id="trade-buttons" class="trade-buttons">
@@ -77,13 +80,19 @@
           <button class="flip" data-flip disabled title="롱이면 숏으로, 숏이면 롱으로 같은 계약 수만큼 뒤집는다(시장가 한 건). 자동 주문은 꺼진다">포지션 뒤집기</button>
           <button class="flat" data-flatten disabled title="모든 포지션을 시장가로 정리하고 자동 주문을 멈춘다(켜 두면 30초 뒤 목표 계약 수로 다시 들기 때문)">포지션 정리 <small>(자동 주문 멈춤)</small></button>
         </div>
-        <button id="cancel-pending" class="cancel-pending" type="button" hidden>미체결 주문 취소</button>
+        <h3 class="trade-sub">지정가 <small>차트 우클릭으로도</small></h3>
         <div class="limit-close">
-          <input id="limit-price" type="number" step="0.25" min="0" inputmode="decimal" aria-label="지정가 정리 가격" placeholder="지정가">
+          <input id="limit-price" type="number" step="0.25" min="0" inputmode="decimal" aria-label="지정가 가격" placeholder="지정가">
           <button id="limit-now" type="button" title="가격 칸을 지금 시장 가격(마지막 체결가)으로 바꾼다">최신 가격</button>
-          <button id="limit-btn" data-limit disabled title="지금 포지션 전부를 이 가격의 지정가 한 건으로 닫는다. 자동 주문은 꺼진다">지정가 정리</button>
         </div>
-        <div id="live-pos"></div>
+        <!-- 지정가 진입: 위 가격 칸의 가격에 비중 막대의 계약 수만큼. 차트 우클릭 메뉴도 이 버튼들을 누른다 -->
+        <div id="limit-open" class="limit-open">
+          <button class="buy" data-side="1" disabled>지정가 매수</button>
+          <button class="sell" data-side="-1" disabled>지정가 매도</button>
+          <button id="limit-btn" class="close" data-limit disabled title="지금 포지션 전부를 이 가격의 지정가 한 건으로 닫는다. 자동 주문은 꺼진다">지정가 정리</button>
+        </div>
+        <h3 class="trade-sub">자동 주문</h3>
+        <label class="live-pick">대회 매매법 <select id="live-pick" aria-label="대회 매매법"></select></label>
         <div id="live"></div>
       </section>
       <!-- 매매법: 차트에 표시할 후보, 그 후보의 지금 포지션과 근거 -->

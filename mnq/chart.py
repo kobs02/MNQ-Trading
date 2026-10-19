@@ -3,10 +3,15 @@
 화면은 0.5초마다 물어도 되고, LS로는 분봉 조회를 봉 단위마다 RESYNC초에 한 번만 보낸다(o3103은 초당 1회까지).
 체결이 끊겼으면(장이 쉬거나 웹소켓이 끊김) 분봉 조회를 FALLBACK초마다 해서 맞춘다.
 """
+import logging
 import threading
 import time
 
+import pandas as pd
+
 from . import config, ls, paper, strategies, stream
+
+log = logging.getLogger(__name__)
 
 INTERVALS = {"1": 1, "5": 5, "15": 15, "60": 60, "D": None}  # 화면의 봉 단위 → 분. D: 일봉(야후 NQ=F, 2021 ~)
 DAILY_FROM = "2021-01-01"
@@ -25,7 +30,9 @@ _fetching = threading.Lock()  # LS 조회는 한 번에 하나만(동시에 온 
 
 def _symbol():
     if not paper.status["symbol"]:
-        paper.status["symbol"] = ls.front_month()["Symbol"]
+        m = ls.front_month()
+        paper.status["symbol"] = m["Symbol"]
+        paper.status["margin"] = float(m.get("OpngMgn") or 0) or None  # 1계약 개시증거금(달러): 화면의 '잔고의 몇 %' 비중 막대가 쓴다
     return paper.status["symbol"]
 
 
@@ -162,10 +169,68 @@ def replay():
     return _replay["data"]
 
 
+_mtf = {"at": 0, "data": []}
+
+
+def macd_mtf():
+    """차트의 'MACD 동시' 신호(관찰용, 최근 14일). 1분봉은 _scalp_loop가 1분마다 이어 받으므로 30초마다 다시 계산한다."""
+    if time.time() - _mtf["at"] > 30:
+        m = strategies.minute_history()
+        _mtf.update(at=time.time(), data=strategies.macd_mtf_events(m, since=m.index[-1] - pd.Timedelta(days=14)))
+    return _mtf["data"]
+
+
+def update_minutes(symbol):
+    """스캘핑용 LS 1분봉 파일(store/data/ls_<종목>_1m.pkl, research/fetch_1m.py가 처음 만든 것)을 지금까지 이어 붙인다.
+    최근 것부터 거슬러 받다가 저장된 마지막 봉에 닿으면 멈춘다. 마감된 봉만 넣는다. 새로 넣은 봉 수."""
+    import pandas as pd
+    path = config.STORE / "data" / f"ls_{symbol}_1m.pkl"
+    old = pd.read_pickle(path) if path.exists() else None
+    last = old.index[-1].timestamp() if old is not None else 0
+    rows, cont = ls.minute_bars(symbol, 1, 500, more=True)
+    while cont and rows and rows[0]["t"] > last and len(rows) < 50_000:  # 파일이 없으면 약 5주까지만
+        part, cont = ls.minute_bars(symbol, 1, 500, cont=cont, more=True)
+        if not part:
+            break
+        rows = part + rows
+    rows = [r for r in rows if r["t"] > last and r["t"] + 60 <= time.time()]
+    if not rows:
+        return 0
+    new = pd.DataFrame(rows).drop_duplicates("t").set_index("t").sort_index()[["open", "high", "low", "close", "volume"]].astype(float)
+    new.index = pd.to_datetime(new.index, unit="s", utc=True).tz_convert("America/New_York")
+    df = new if old is None else pd.concat([old, new])
+    df[~df.index.duplicated(keep="last")].sort_index().to_pickle(path)
+    return len(new)
+
+
+def _scalp_loop():
+    """1분마다 1분봉 파일을 이어 붙이고 스캘핑 후보의 과거 시험 매매(차트의 추천 구간)를 다시 계산한다."""
+    while True:
+        try:
+            symbol = paper.status["symbol"]
+            if symbol and update_minutes(symbol) and _replay["data"]:
+                for key, cand in config.CANDIDATES.items():
+                    if "scalp" in cand:
+                        _replay["data"][key] = strategies.replay(key, None)
+        except Exception as e:
+            log.warning("스캘핑 1분봉 이어 받기 실패: %s", e)
+        time.sleep(60)
+
+
 def get_chart(key, since=None):
     return {"interval": key, "bars": bars(key, since), "quote": quote()}
 
 
 def start():
-    """실시간 체결 웹소켓을 붙인다."""
-    stream.start(_symbol())
+    """실시간 체결 웹소켓을 붙이고, 스캘핑 1분봉 이어 받기를 돌린다. 종목을 아직 못 받았으면 받을 때까지 뒤에서 다시 묻는다."""
+    def run():
+        # LS가 켤 때 잠깐 응답하지 않으면(10-19: o3101 15초 시간 초과) 서버 전체가 죽었다
+        while True:
+            try:
+                stream.start(_symbol())
+                break
+            except Exception as e:
+                log.warning("LS 종목 조회 실패, 30초 뒤 다시: %s", e)
+                time.sleep(30)
+    threading.Thread(target=run, name="stream-start", daemon=True).start()
+    threading.Thread(target=_scalp_loop, name="scalp-minutes", daemon=True).start()

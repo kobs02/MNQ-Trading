@@ -37,9 +37,10 @@ function render(d) {
   const gross = closes.reduce((s, r) => s + r.realized, 0), fees = fills.reduce((s, r) => s + r.fee, 0);
   const wins = closes.filter((r) => r.realized > 0).length;
   const stat = (label, value, extra = '') => `<div><span>${label}</span><b>${value}</b>${extra ? `<em>${extra}</em>` : ''}</div>`;
+  const broker = fees / 2;  // fees = 체결 1계약당 증권사 $1 + 대회 차감 $1
   $('summary').innerHTML = [
-    stat('수수료 뺀 실현 손익', `<span class="${tone(gross - fees)}">${fmtMoney(gross - fees)}</span>`, fmtSigned((gross - fees) / d.capital, 3)),
-    stat('실현 손익 (수수료 전)', `<span class="${tone(gross)}">${fmtMoney(gross)}</span>`, `수수료 ${fmtMoney(fees)}`),
+    stat('대회 기준 손익', `<span class="${tone(gross - fees)}">${fmtMoney(gross - fees)}</span>`, `${fmtSigned((gross - fees) / d.capital, 2)} · 대회 차감 ${fmtMoney(broker)}까지 뺌`),
+    stat('실현 손익 (증권사 수수료 뺌)', `<span class="${tone(gross - broker)}">${fmtMoney(gross - broker)}</span>`, `LS 계좌와 같은 값 · 수수료 전 ${fmtMoney(gross)}, 수수료 ${fmtMoney(broker)}`),
     stat('체결', `${fills.length}건`, `${fills.reduce((s, r) => s + Math.abs(r.filled), 0)}계약`),
     stat('청산 승률', closes.length ? `${Math.round((wins / closes.length) * 100)}%` : '-', `${wins} / ${closes.length}`),
   ].join('');
@@ -51,7 +52,38 @@ function render(d) {
       + `<td class="${slip > 0 ? 'c-down' : slip < 0 ? 'c-up' : ''}">${slip == null ? '-' : `${slip > 0 ? '+' : ''}${slip.toFixed(1)}틱`}</td>`
       + `<td>${r.realized == null ? '-' : `<b class="${tone(r.realized)}">${fmtMoney(r.realized)}</b>`}</td><td>${r.filled ? fmtMoney(r.fee) : '-'}</td><td>${state}</td><td>${r.number || '-'}</td></tr>`;
   }).join('') : '<tr><td colspan="11" class="empty">아직 주문이 없습니다.</td></tr>';
+  renderCalendar(rows, d);
   $('updated').textContent = `${new Date().toLocaleTimeString('ko-KR')} 조회`;
+}
+
+// 대회 달력: 한국 날짜마다 닫은 몫의 손익 - 그날 체결의 수수료(대회 기준). 대회 첫 주 월요일부터 마지막 날이 든 주까지, 주마다 한 줄
+const kstDay = (sec) => new Date((sec + 9 * 3600) * 1000).toISOString().slice(0, 10);
+function renderCalendar(rows, d) {
+  const days = new Map();
+  rows.filter((r) => r.filled).forEach((r) => {
+    const k = kstDay(r.time), v = days.get(k) || { net: 0, fills: 0 };
+    v.net += (r.realized || 0) - r.fee;
+    v.fills += 1;
+    days.set(k, v);
+  });
+  const first = kstDay(d.start), last = kstDay(d.end), today = kstDay(Date.now() / 1000);
+  const day = new Date(first + 'T00:00:00Z');
+  day.setUTCDate(day.getUTCDate() - ((day.getUTCDay() + 6) % 7));  // 그 주 월요일
+  const cell = (net, extra) => `<b class="${tone(net)}">${net > 0 ? '+' : ''}${fmtMoney(net)}</b><small class="${tone(net)}">${fmtSigned(net / d.capital, 2)}</small>${extra}`;
+  const weeks = [];
+  while (day.toISOString().slice(0, 10) <= last) {
+    let week = 0, cells = '', begun = false;
+    for (let i = 0; i < 7; i++, day.setUTCDate(day.getUTCDate() + 1)) {
+      const k = day.toISOString().slice(0, 10), v = days.get(k), out = k < first || k > last;
+      week += v ? v.net : 0;
+      begun = begun || (k >= first && k <= today);
+      const cls = [out ? 'out' : '', k === today ? 'today' : '', v ? (v.net > 0 ? 'win' : v.net < 0 ? 'loss' : '') : ''].join(' ').trim();
+      cells += `<td class="${cls}"><span class="cal-date">${day.getUTCMonth() + 1}.${day.getUTCDate()}</span>`
+        + (v ? cell(v.net, `<em>체결 ${v.fills}건</em>`) : out || k > today ? '' : '<small>거래 없음</small>') + '</td>';
+    }
+    weeks.push(`<tr>${cells}<td class="cal-week">${begun ? cell(week, '') : ''}</td></tr>`);  // 아직 안 온 주는 비운다
+  }
+  $('cal').innerHTML = weeks.join('');
 }
 
 async function tick() {

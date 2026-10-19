@@ -12,6 +12,7 @@ import json
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -154,9 +155,13 @@ def manual(qty=None, flip=False):
         with _lock:
             _load().update(enabled=False, flatten=False)
             _save()
-        if any(int(o.get("UnercQty") or 0) > 0 for o in ls.orders(symbol)):
+        # 주문내역과 미결제잔고는 TR이 달라 초당 한도를 따로 센다: 같이 물어 주문 전 기다림을 반으로(각 0.3 ~ 1.3초)
+        with ThreadPoolExecutor(2) as pool:
+            rows, net = pool.submit(ls.orders, symbol), pool.submit(ls.positions)
+            rows, net = rows.result(), net.result()[0]
+        if any(int(o.get("UnercQty") or 0) > 0 for o in rows):
             raise ValueError("미체결 주문이 있습니다")
-        actual = int(ls.positions()[0].get(symbol, 0))
+        actual = int(net.get(symbol, 0))
         if flip:
             if not actual:
                 raise ValueError("뒤집을 포지션이 없습니다")
@@ -184,9 +189,12 @@ def _pending(symbol):
     return rows
 
 
-def limit_close(price):
-    """화면의 '지정가로 정리': 지금 포지션 전부를 그 가격의 지정가 한 건으로 닫는다. 자동 주문은 먼저 끈다
+def limit_close(price, qty=None):
+    """화면의 '지정가로 정리'(qty 없음): 지금 포지션 전부를 그 가격의 지정가 한 건으로 닫는다.
+    '지정가 매수·매도'(qty = +n·-n): 그 가격에 n계약 지정가 진입. 자동 주문은 먼저 끈다
     (켜 두면 미체결 동안은 기다리다가 체결 뒤 목표 계약 수로 다시 들기 때문). 미체결은 cancel_pending으로 취소한다."""
+    if qty is not None and (type(qty) is not int or not qty):
+        raise ValueError("계약 수가 올바르지 않습니다")
     symbol = _check_price(price)
     if not started():
         raise ValueError("대회 시작 전에는 주문하지 않습니다")
@@ -200,18 +208,21 @@ def limit_close(price):
         if _pending(symbol):
             raise ValueError("미체결 주문이 있습니다(먼저 취소하세요)")
         actual = int(ls.positions()[0].get(symbol, 0))
-        if not actual:
+        close = qty is None
+        if close and not actual:
             raise ValueError("정리할 포지션이 없습니다")
-        qty = -actual
-        entry = {"time": int(time.time()), "day": ny.strftime("%Y-%m-%d"), "symbol": symbol, "qty": qty, "from": actual, "to": 0,
+        qty = -actual if close else qty
+        if abs(actual + qty) > config.LIVE["max_contracts"]:
+            raise ValueError(f"체결 뒤 {actual + qty}계약이 최대({config.LIVE['max_contracts']}계약)를 넘습니다")
+        entry = {"time": int(time.time()), "day": ny.strftime("%Y-%m-%d"), "symbol": symbol, "qty": qty, "from": actual, "to": actual + qty,
                  "price": price, "manual": True, "limit": True}
         try:
             entry.update(ok=True, number=ls.limit_order(symbol, qty, price))
-            console.success(log, "LS 모의계좌 지정가 정리: %s %d계약 @ %.2f 주문번호 %s · 자동 주문은 껐습니다", "매수" if qty > 0 else "매도",
+            console.success(log, "LS 모의계좌 지정가 " + ("정리" if close else "진입") + ": %s %d계약 @ %.2f 주문번호 %s · 자동 주문은 껐습니다", "매수" if qty > 0 else "매도",
                             abs(qty), price, entry["number"])
         except Exception as e:
             entry.update(ok=False, error=str(e))
-            log.error("LS 모의계좌 지정가 정리 실패: %s", e)
+            log.error("LS 모의계좌 지정가 %s 실패: %s", "정리" if close else "진입", e)
         _record(entry)
         _pending(symbol)
     return entry
@@ -242,7 +253,7 @@ def modify_limit(number, price):
                         row.get("OvrsDrvtOrdPrc"), price, number, new)
         with _lock:
             for o in _load()["orders"]:
-                if o.get("number") == number:
+                if o.get("number") and int(o["number"]) == int(number):  # LS는 0000000778, 기록은 778로 올 때가 있다
                     o.update(number=new, price=price)
             _save()
         _pending(symbol)
@@ -396,7 +407,7 @@ _history = {"at": 0, "data": None}
 def history():
     """주문 기록 탭: 이 프로그램이 낸 주문(store/live.json)에 LS 주문내역의 체결가·체결 수량·상태를 붙이고,
     LS에만 있는 주문(증권사 앱에서 낸 것)도 넣는다. 조회 한도 때문에 10초 동안은 같은 값을 준다.
-    shortcut: LS 주문내역은 오늘과 어제(한국 날짜)만 조회한다. 그 전 주문은 낸 때의 시세만 보인다. 대회 내내 체결가가 필요하면 날짜별로 받아 store에 쌓을 것."""
+    LS 주문내역은 대회 첫날부터 날마다 받는다. 그저께까지의 날은 끝난 날이라 한 번 받으면 store/ls_orders/에 두고 다시 묻지 않는다."""
     if _history["data"] and time.time() - _history["at"] < 10:
         return _history["data"]
     with _lock:
@@ -404,27 +415,52 @@ def history():
     symbol = paper.status["symbol"]
     rows = {}
     if symbol:
-        for day in (datetime.now(KST) - timedelta(days=1), datetime.now(KST)):
-            for r in ls.orders(symbol, day.strftime("%Y%m%d")):
+        day, today = datetime.fromtimestamp(config.LIVE["start"], KST).date(), datetime.now(KST).date()
+        while day <= today:
+            for r in _day_orders(symbol, day, done=day < today - timedelta(days=1)):
                 rows[int(r["OvrsFutsOrdNo"])] = r
+            day += timedelta(days=1)
+    later = {int(r["OvrsFutsOrgOrdNo"]): r for r in rows.values() if r.get("TrdTpNm") == "정정"}  # 원래 번호 → 그것을 정정한 주문
     num = lambda r, k: float(r.get(k) or 0)
-    out = []
+    out, seen = [], set()
     for o in mine:
         r = rows.pop(int(o["number"]), None) if o.get("number") else None
+        if o.get("number"):
+            seen.add(int(o["number"]))
+        while r is not None and int(r.get("MdfyQty") or 0) and int(r["OvrsFutsOrdNo"]) in later:  # 정정됐으면 마지막 정정 주문의 체결을 본다
+            r = later[int(r["OvrsFutsOrdNo"])]
         out.append({**o, "kind": "정리" if o.get("flatten") else "지정가" if o.get("limit") else "횟수 채우기" if o.get("filler") else "직접" if o.get("manual") else "자동",
                     **({"exec_price": num(r, "AbrdFutsExecPrc"), "exec_qty": int(r.get("ExecQty") or 0), "unfilled": int(r.get("UnercQty") or 0),
                         "canceled": int(r.get("CancQty") or 0), "state": r.get("TpCodeNm")} if r else {})})
     for n, r in rows.items():  # 이 프로그램 밖에서 낸 주문
         if r.get("TrdTpNm") != "신규":
             continue
+        last = r
+        while int(last.get("MdfyQty") or 0) and int(last["OvrsFutsOrdNo"]) in later:
+            last = later[int(last["OvrsFutsOrdNo"])]
+        if int(last["OvrsFutsOrdNo"]) in seen:  # 이 프로그램이 정정한 지정가의 처음 번호(기록은 정정된 새 번호로 바뀌어 있다)
+            continue
         t = datetime.strptime(r["OrdDt"] + r["OrdTime"][:6], "%Y%m%d%H%M%S").replace(tzinfo=KST)
         sign = 1 if r.get("BnsTpCode") == "2" else -1
         out.append({"time": int(t.timestamp()), "symbol": r.get("IsuCodeVal"), "qty": sign * int(r.get("OrdQty") or 0), "number": str(n), "ok": True,
-                    "kind": "LS 앱", "price": num(r, "OvrsDrvtOrdPrc") or None, "exec_price": num(r, "AbrdFutsExecPrc"), "exec_qty": int(r.get("ExecQty") or 0),
-                    "unfilled": int(r.get("UnercQty") or 0), "canceled": int(r.get("CancQty") or 0), "state": r.get("TpCodeNm")})
+                    "kind": "LS 앱", "price": num(r, "OvrsDrvtOrdPrc") or None, "exec_price": num(last, "AbrdFutsExecPrc"), "exec_qty": int(last.get("ExecQty") or 0),
+                    "unfilled": int(last.get("UnercQty") or 0), "canceled": int(last.get("CancQty") or 0), "state": last.get("TpCodeNm")})
     out.sort(key=lambda o: o["time"])
-    _history.update(at=time.time(), data={"orders": out, "capital": config.CAPITAL, "multiplier": config.MULTIPLIER, "fee": 1.0})
+    _history.update(at=time.time(), data={"orders": out, "capital": config.CAPITAL, "multiplier": config.MULTIPLIER, "fee": 1.0,
+                                          "start": config.LIVE["start"], "end": config.LIVE["end"]})
     return _history["data"]
+
+
+def _day_orders(symbol, day, done):
+    """그날(한국 날짜)의 LS 주문내역. done(끝난 날)이면 store/ls_orders/에 두고 다시 묻지 않는다."""
+    path = config.STORE / "ls_orders" / f"{symbol}_{day:%Y%m%d}.json"
+    if done and path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    rows = ls.orders(symbol, f"{day:%Y%m%d}")
+    if done:
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    return rows
 
 
 def get_live():
@@ -433,7 +469,7 @@ def get_live():
         state = json.loads(json.dumps(_load()))
     return {"enabled": state["enabled"], "started": started(), "start": config.LIVE["start"], "candidate": candidate(),
             "choices": {k: c["name"] for k, c in config.CANDIDATES.items() if not c.get("watch")},
-            "max_contracts": config.LIVE["max_contracts"], "min_weekly": config.LIVE["min_weekly"], **status, "orders": state["orders"][::-1][:20]}
+            "max_contracts": config.LIVE["max_contracts"], "contract_margin": paper.status.get("margin"), "min_weekly": config.LIVE["min_weekly"], **status, "orders": state["orders"][::-1][:20]}
 
 
 if __name__ == "__main__":
@@ -466,7 +502,7 @@ if __name__ == "__main__":
     tick()
     assert sent == [2, -3], sent                  # 롱 2 → 숏 1: 매도 3
     _state["orders"][-1]["time"] -= CONFIRM + 1
-    paper._load = lambda: {config.LIVE["candidate"]: {"contracts": 9}}
+    paper._load = lambda: {config.LIVE["candidate"]: {"contracts": 99}}
     tick()
     assert sent == [2, -3] and "최대" in status["note"]
     paper._load = lambda: {config.LIVE["candidate"]: {"contracts": 0}}
@@ -490,7 +526,7 @@ if __name__ == "__main__":
     manual(-2)
     assert sent == [2, -3, 1, -2] and not _state["enabled"] and _state["orders"][-1]["manual"]  # 직접 주문은 자동 주문을 끈다
     book["pos"] = -2
-    for bad in (-3, 0, 1.5, True):  # 최대 초과(-5), 0, 소수, 참거짓은 거절
+    for bad in (-30, 0, 1.5, True):  # 최대 초과(-32), 0, 소수, 참거짓은 거절
         try:
             manual(bad)
             raise AssertionError(bad)
@@ -512,6 +548,15 @@ if __name__ == "__main__":
     book["pos"], _state["enabled"] = 2, True
     limit_close(30010.25)
     assert limits == [(-2, 30010.25)] and not _state["enabled"] and _state["orders"][-1]["limit"], limits
+    limit_close(29990.0, 3)                       # 지정가 진입: 롱 2에 매수 3 → 체결되면 롱 5
+    assert limits[-1] == (3, 29990.0) and _state["orders"][-1]["to"] == 5, limits
+    for bad in (19, 0, 1.5):                      # 최대 초과(21), 0, 소수는 거절
+        try:
+            limit_close(29990.0, bad)
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+    limits.pop()
     book["pending"] = [{"UnercQty": "2", "OvrsFutsOrdNo": "0000000002", "BnsTpCode": "1", "OvrsDrvtOrdPrc": "30010.25", "AbrdFutsOrdPtnCode": "2"}]
     tick()
     assert status["pending"] == [{"number": "0000000002", "qty": -2, "price": 30010.25, "limit": True}], status["pending"]

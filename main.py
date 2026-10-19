@@ -52,4 +52,9 @@ if __name__ == "__main__":
     chart.start()    # 실시간 체결 웹소켓: 차트의 마지막 봉과 현재가를 체결마다 고친다
     live.run()       # LS 모의계좌 자동 주문: 대회 시작(config.LIVE) 뒤부터 가상 계좌를 따라 주문한다
     tray.start(url)  # 작업 표시줄 알림 영역의 아이콘: 서버가 켜져 있는 동안 떠 있다
-    app.run(host=config.HOST, port=config.PORT, threaded=True)
+    try:
+        app.run(host=config.HOST, port=config.PORT, threaded=True)
+    finally:
+        # 웹 서버가 멈추면(Ctrl+C 등) 프로세스를 통째로 끝낸다. 그러지 않으면 아이콘 스레드 때문에 포트 없이 남아
+        # 가상 계좌·자동 주문 스레드가 다음에 켠 서버와 함께 돌았다(10-19 두 번 발견)
+        os._exit(0)

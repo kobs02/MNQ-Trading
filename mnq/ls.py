@@ -102,12 +102,22 @@ def today():
 # ---------- 시세 ----------
 
 def front_month(product=config.PRODUCT):
-    """그 상품의 거래 가능한 종목 가운데 만기가 가장 가까운 것(예: MNQZ26)의 마스터 정보."""
-    data, _ = call("o3101", {"o3101InBlock": {"gubun": ""}})
+    """그 상품의 거래 가능한 종목 가운데 만기가 가장 가까운 것(예: MNQZ26)의 마스터 정보.
+    o3101이 안 되면 마지막으로 받은 것(store/front_month.json)을 쓴다(10-19: o3101만 15초 넘게 응답이 없어 차트가 못 떴다)."""
+    saved = config.STORE / f"front_month_{product}.json"
+    try:
+        data, _ = call("o3101", {"o3101InBlock": {"gubun": ""}})
+    except Exception:
+        # shortcut: 저장한 지 7일 안의 것만 쓴다(월물이 바뀌는 롤오버는 석 달마다라 그 사이에 틀릴 일은 드물다)
+        if saved.exists() and time.time() - saved.stat().st_mtime < 7 * 86400:
+            return json.loads(saved.read_text(encoding="utf-8"))
+        raise
     rows = [r for r in data.get("o3101OutBlock", []) if r["BscGdsCd"] == product and r.get("DlPsblCd") == "1"]
     if not rows:
         raise LSError(f"{product} 종목을 마스터에서 찾지 못했습니다.")
-    return min(rows, key=lambda r: (r["LstngYr"], "FGHJKMNQUVXZ".index(r["LstngM"])))
+    row = min(rows, key=lambda r: (r["LstngYr"], "FGHJKMNQUVXZ".index(r["LstngM"])))
+    saved.write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
+    return row
 
 
 def quote(symbol):
@@ -162,10 +172,15 @@ def positions():
 
 def orders(symbol, day=None):
     """그날(한국 날짜 YYYYMMDD, 기본 오늘)의 주문내역. OrdDt·OrdTime도 한국 시각이다(10-19 확인)."""
-    data, _ = call("CIDBQ01800", {"CIDBQ01800InBlock1": {"RecCnt": 1, "IsuCodeVal": symbol, "OrdDt": day or today(), "ThdayTpCode": " ",
-                                                         "OrdStatCode": "0", "BnsTpCode": "0", "QryTpCode": "2", "OrdPtnCode": "00",
-                                                         "OvrsDrvtFnoTpCode": "A"}})
-    return data.get("CIDBQ01800OutBlock2") or []
+    body = {"CIDBQ01800InBlock1": {"RecCnt": 1, "IsuCodeVal": symbol, "OrdDt": day or today(), "ThdayTpCode": " ",
+                                   "OrdStatCode": "0", "BnsTpCode": "0", "QryTpCode": "2", "OrdPtnCode": "00", "OvrsDrvtFnoTpCode": "A"}}
+    # 한 번에 20건까지만 온다: 다음 쪽 열쇠로 끝까지 받는다(10-19: 21번째부터의 미체결 지정가를 못 봐 정리 주문이 두 번 나갔다)
+    rows, key = [], None
+    while True:
+        data, key = call("CIDBQ01800", body, key)
+        rows += data.get("CIDBQ01800OutBlock2") or []
+        if not key:
+            return rows
 
 
 # ---------- 주문 ----------
