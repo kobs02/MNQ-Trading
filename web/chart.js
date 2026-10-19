@@ -1083,7 +1083,12 @@ function renderAccount() {
 }
 
 // LS 모의계좌의 실제 진입가: 차트에 실선(가상 계좌의 점선과 구분), 주문 칸에 진입가와 수익률(가격 움직임 기준, 괄호 안은 손익과 계좌 대비)
-let realLine = null, realKey = '';
+let realLine = null, realKey = '', evenLine = null;
+// 수수료 뺀 본전 가격: 진입·청산 각각 대회 차감 $1 + 증권사 $1(계약당)을 메우는 가격을, 이익 쪽으로 0.25틱에 올려 맞춘다(계약 수와 상관없이 2포인트)
+const breakeven = (p) => {
+  const raw = p.entry + Math.sign(p.qty) * closeFee(p) / (Math.abs(p.qty) * (state.trading ? state.trading.multiplier : 2));
+  return (p.qty > 0 ? Math.ceil : Math.floor)(raw * 4) / 4;
+};
 function renderRealEntry(p) {
   const key = p ? `${p.qty}|${p.entry}` : '';
   if (key !== realKey) {  // 0.5초마다 불리므로 진입가나 계약 수가 바뀔 때만 다시 그린다
@@ -1093,10 +1098,16 @@ function renderRealEntry(p) {
       price: p.entry, color: p.qty > 0 ? UP : DOWN, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
       axisLabelVisible: true, title: `실제 진입 ${position(p.qty).replace(/<[^>]+>/g, '')}`,
     }) : null;
+    if (evenLine) series.removePriceLine(evenLine);
+    evenLine = p ? series.createPriceLine({
+      price: breakeven(p), color: MTF_GOLD, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted,
+      axisLabelVisible: true, title: `본전 (수수료 $${closeFee(p)} 뺌) · 이보다 ${p.qty > 0 ? '위' : '아래'}면 이익`,
+    }) : null;
   }
   const move = p ? Math.sign(p.qty) * (p.price / p.entry - 1) : 0;
   $('live-pos').innerHTML = p ? rows([
     ['실제 진입', `${position(p.qty)} @ <b>${fmtPrice(p.entry)}</b>`],
+    ['본전', `<b class="mtf-gold">${fmtPrice(breakeven(p))}</b> <small>(수수료 $${closeFee(p)} 뺀 최소 익절, 진입가 ${p.qty > 0 ? '+' : '−'}${Math.abs(breakeven(p) - p.entry).toFixed(2)}pt)</small>`],
     ['수익률', `<b class="${tone(move)}">${fmtSigned(move)}</b> <small>(${fmtMoney(p.pnl)} · 계좌 ${fmtSigned(p.of_capital, 3)})</small>`],
   ]) : rows([['실제 진입', '포지션 없음']].concat(closed ? [['정리 결과', closed]] : []));
 }
