@@ -19,7 +19,7 @@ const SLEEVES = { daily: '일봉', intraday: '장중' };
 const partsText = (parts) => (parts && 'intraday' in parts ? Object.entries(parts).map(([k, n]) => `${SLEEVES[k]} ${n > 0 ? '롱' : n < 0 ? '숏' : ''}${n ? ' ' + Math.abs(n) : '없음'}`).join(' · ') : '');
 const position = (n) => (n > 0 ? `<span class="c-up">롱 ${n}계약</span>` : n < 0 ? `<span class="c-down">숏 ${-n}계약</span>` : '없음');
 const INTERVALS = { 1: '1분', 5: '5분', 15: '15분', 60: '1시간', D: '일봉' };
-const UP = '#26a69a', DOWN = '#ef5350';
+const UP = token('--long'), DOWN = token('--short');
 // 차트 라이브러리는 UTC로 표시하므로 시각을 이 컴퓨터의 시간대만큼 밀어서 넣는다
 const TZ = -new Date().getTimezoneOffset() * 60;
 
@@ -821,6 +821,7 @@ const MTF = {
 };
 async function loadMtf() {
   try { state.mtf = await api('/api/macd_mtf'); } catch (e) { state.mtf = []; }
+  mtfAlert();
   renderMarkers();
   if (current() && current().mtf) renderSide();  // 범례 아래 '마지막 신호'
 }
@@ -835,6 +836,26 @@ function mtfMarkers(first) {
       shape: buy ? 'arrowUp' : 'arrowDown', size: st.size,
     };
   });
+}
+// 새 중·강 신호가 오면 소리: 중은 한 번, 강은 세 번. 매수는 높은 음, 매도는 낮은 음. 처음 받은 신호는 지난 것이라 울리지 않는다
+let mtfSeen = null, audio = null;
+document.addEventListener('pointerdown', () => { audio = audio || new AudioContext(); }, { once: true });  // 브라우저는 클릭 전에는 소리를 막는다
+function beep(freq, at) {
+  const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime + at;
+  o.frequency.value = freq;
+  g.gain.setValueAtTime(0.2, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+  o.connect(g).connect(audio.destination);
+  o.start(t);
+  o.stop(t + 0.25);
+}
+function mtfAlert() {
+  const list = state.mtf || [], last = list.length ? list[list.length - 1].time : 0;
+  const fresh = mtfSeen === null ? [] : list.filter((s) => s.time > mtfSeen && s.level >= 2);
+  mtfSeen = Math.max(mtfSeen || 0, last);
+  const s = fresh.sort((a, b) => b.level - a.level)[0];  // 한꺼번에 여럿이면 가장 센 것 하나만
+  if (!s || !audio) return;
+  for (let i = 0; i < (s.level === 3 ? 3 : 1); i++) beep(s.side > 0 ? 880 : 440, i * 0.3);
 }
 const mtfTfs = (s) => s.tfs.join(' / ');  // 함께 꺾인 분봉: 1 / 5, 5 / 15 / 60
 const mtfRsi = (s) => Math.round((s.side > 0 ? Math.min : Math.max)(...Object.values(s.rsi)));  // 가장 과매도(매수)·과매수(매도)인 RSI

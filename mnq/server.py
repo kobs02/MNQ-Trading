@@ -7,7 +7,7 @@ import logging
 from flask import Flask, jsonify, redirect, request
 from werkzeug.exceptions import HTTPException
 
-from . import chart, config, live, paper
+from . import chart, config, live, news, paper
 
 app = Flask(__name__, static_folder=str(config.ROOT / "web"), static_url_path="")
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # 화면과 스크립트의 버전이 어긋나지 않게 매번 확인한다
@@ -131,6 +131,11 @@ def api_live_flatten():
     _json()
     live.flatten()
     return jsonify(live.get_live())
+
+
+@app.get("/api/news")
+def api_news():
+    return jsonify(news.get_news())
 
 
 @app.get("/api/trading")

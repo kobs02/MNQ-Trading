@@ -8,7 +8,7 @@
 - 프로젝트는 **C:\dev**에 모아 둔다(바탕화면이 아님).
 - 원격: https://github.com/kobs02/MNQ-Trading (private, `main`). Recommender의 원격(API-Trader)과 섞지 않는다.
 - 앱키·시크릿은 `keys.json`(git 제외)에만 둔다. 채팅에 키를 붙여 넣지 않게 안내한다. 형식: `{"appkey": "...", "appsecret": "..."}`
-- 화면은 Recommender 사이트의 디자인을 그대로 따른다(`web/style.css`, `theme.js`, `grip.js`는 Recommender에서 복사).
+- 화면은 Recommender 사이트의 디자인에서 출발했다(`web/style.css`, `theme.js`, `grip.js`는 Recommender에서 복사). 10-19에 색을 바꿨다: 깊은 남색 바탕 + 보라 → 하늘색 강조(`--brand-grad`), 롱·숏 #0ecb81·#f6465d, 색은 `style.css` 맨 위 변수와 맨 끝 "개편 마감층"에 있다.
 - 실매매 전용 페이지(Recommender의 API Trading 같은 주문 화면)는 만들지 않는다. 자동 주문 상태와 직접 주문 버튼(매수 1·매도 1·전부 정리하고 멈춤, 10-18 추가)은 실시간 차트 오른쪽 칸에만 있다. 직접 주문을 내면 자동 주문이 꺼진다(켜 두면 30초 뒤 목표로 되돌리므로).
 - 사용자가 철회한 아이디어: X·Threads로 급등·급락 파악(유료 API·앱 심사 필요).
 - 실험은 **통과 기준을 먼저 정하고**, 설계 구간에서 고른 뒤 확인 구간으로 판정한다. 결과가 너무 좋으면 미래 정보 누출부터 의심하고, 새 입력은 **자르기 점검**(그 시점까지만 잘라 계산한 값 = 전체로 계산한 값)을 한다.

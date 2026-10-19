@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>뉴스 · 심리 | MNQ Trader</title>
+  <link rel="icon" type="image/png" href="icon.png">
+  <meta name="theme-color" content="#1d2431">
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/wanteddev/wanted-sans@v1.0.3/packages/wanted-sans/fonts/webfonts/variable/split/WantedSansVariable.min.css">
+  <link rel="stylesheet" href="style.css">
+  <script>document.documentElement.dataset.theme = localStorage.getItem("theme") === "light" ? "light" : "dark";</script>
+</head>
+<body class="news-page">
+  <a class="skip-link" href="#content">본문으로 건너뛰기</a>
+  <header>
+    <nav class="pages" aria-label="페이지">
+      <a href="chart.html">실시간 차트</a>
+      <a href="paper.html">모의 운용</a>
+      <a href="orders.html">주문 기록</a>
+      <a href="news.html" class="active" aria-current="page">뉴스 · 심리</a>
+    </nav>
+    <span id="updated" class="conn" role="status"></span>
+  </header>
+
+  <!-- 나스닥 관련 뉴스·레딧 글 제목의 분위기 + CNN 공포·탐욕 지수 + VIX·VXN (mnq/news.py) -->
+  <main id="content" class="page-wrap" tabindex="-1">
+    <div class="paper-head">
+      <div>
+        <h1>뉴스 · 심리 <small>나스닥 · 미국 증시</small></h1>
+      </div>
+      <div class="head-tools"><button id="refresh" class="plain-button">새로고침</button></div>
+    </div>
+
+    <div class="news-top">
+      <section class="card recommend">
+        <h2>시장 분위기 종합</h2>
+        <div id="outlook" class="muted">뉴스를 가져와 분석하는 중… (처음에는 10초쯤 걸립니다)</div>
+      </section>
+      <div id="tiles" class="tiles"></div>
+    </div>
+
+    <section class="card">
+      <h2>CNN 공포·탐욕 지수 구성 <small>일곱 지표 각각 0 공포 ~ 100 탐욕</small></h2>
+      <div id="fg-parts" class="muted">-</div>
+    </section>
+
+    <section class="card">
+      <h2>최신 글 <span class="card-actions" id="filters"></span></h2>
+      <div id="items" class="news-list muted">-</div>
+    </section>
+
+    <section class="card">
+      <h2>출처별 분위기 <small id="window"></small></h2>
+      <div id="groups" class="muted">-</div>
+    </section>
+
+    <section class="card">
+      <h2>분석 방식과 한계</h2>
+      <div class="doc">
+        <ul>
+          <li>CNBC, Yahoo Finance, MarketWatch, Google 뉴스(영문·한글), 연합뉴스의 최신 기사와 레딧 주식 게시판 글의 <b>제목</b>을 가져옵니다. 나스닥·미국 증시와 관련 없는 글과 개별 종목 자동 기사("(NASDAQ:XXX) …")는 뺍니다.</li>
+          <li>긍정 단어(급등, 반등, rally, record 등)와 부정 단어(급락, 우려, sell-off, tariff 등)를 세어 글마다 긍정·중립·부정을 매기고, 최근 글일수록 크게 반영합니다(12시간이면 절반).</li>
+          <li>종합 점수 = 뉴스 45% + 커뮤니티 20% + CNN 공포·탐욕 지수 35%. ±0.2를 넘으면 긍정·부정, 그 안이면 중립입니다. VIX·VXN은 점수에 넣지 않고 보여 주기만 합니다.</li>
+          <li>CNN 사이트는 기사 RSS가 2018년에 멈춰 있어 공포·탐욕 지수만 씁니다. 스레드(Threads)·X는 공개 검색 API가 없어(유료·앱 심사) 넣지 않았습니다.</li>
+        </ul>
+        <p><b>한계</b></p>
+        <ul>
+          <li>단어를 세는 방식이라 문맥, 반어, 부정문을 읽지 못합니다. 글 옆에 판정에 쓴 단어를 적어 두었으니 직접 확인하세요.</li>
+          <li>뉴스는 이미 일어난 가격 움직임을 뒤따라 보도하는 경우가 많습니다. 분위기 점수와 공포·탐욕 지수가 그 뒤 나스닥 방향을 맞히는지는 <b>검증하지 않았고</b>, 비중과 기준값도 임의로 정했습니다. 자동 주문과 추천에는 쓰지 않습니다.</li>
+        </ul>
+      </div>
+    </section>
+
+    <p class="disclaimer">뉴스와 심리 지표는 참고 자료이며 가격 방향을 보장하지 않습니다.</p>
+  </main>
+
+  <script src="news.js"></script>
+  <script src="theme.js"></script>
+</body>
+</html>
