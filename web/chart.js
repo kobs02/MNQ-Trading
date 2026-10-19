@@ -298,7 +298,19 @@ function setTool(tool) {
   renderTools();
   renderDrawings();
 }
-$('tools').addEventListener('click', (e) => {
+// 사이트 안의 작은 확인 창: 확인을 누르면 true, 취소·Esc면 false. only가 있으면 알림(확인 버튼만)
+function ask(text, title = '확인', only = false) {
+  const d = $('ask');
+  $('ask-title').textContent = title;
+  $('ask-text').textContent = text;
+  $('ask-cancel').hidden = only;
+  d.returnValue = '';
+  d.showModal();
+  return new Promise((done) => d.addEventListener('close', () => done(d.returnValue === 'ok'), { once: true }));
+}
+const notice = (text) => ask(text, '알림', true);
+
+$('tools').addEventListener('click', async (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   if (b.dataset.study) {
@@ -310,7 +322,7 @@ $('tools').addEventListener('click', (e) => {
   } else if (b.dataset.tool === 'clear') {
     // 고른 것이 있으면 그것만, 없으면 한 번 묻고 모두
     if (draw.selected) removeSelected();
-    else if (draw.items.length && confirm('고른 것이 없습니다. 그린 수평선과 박스를 모두 지울까요?')) {
+    else if (draw.items.length && await ask('고른 것이 없습니다. 그린 수평선과 박스를 모두 지울까요?', '모두 지우기')) {
       draw.items = [];
       keep('mnqDraw', draw.items);
       setTool(null);
@@ -365,6 +377,92 @@ document.addEventListener('keydown', (e) => {
   // 차트 라이브러리는 마우스 이벤트로도 끌기를 하므로 Shift를 누른 동안은 그것도 막는다
   ['mousedown', 'mousemove', 'mouseup'].forEach((t) => wrap.addEventListener(t, (e) => { if (e.shiftKey || dragging) e.stopPropagation(); }, true));
 })();
+// 미체결 지정가 주문: 차트에 점선으로. 선을 마우스로 끌어 놓으면 그 가격으로 정정한다(LS 정정 주문, 주문번호가 바뀐다)
+const orderLines = new Map();  // 주문번호 → { line, order }
+let orderDrag = null;          // 끄는 중인 { number, order, price }
+// 이 지정가가 그 가격에 체결되면 지금 포지션의 닫는 몫이 수수료 빼고 얼마인가(진입·청산 각각 대회 $1 + 증권사 $1, 계약당). 닫는 주문이 아니면 ''
+function fillPnl(o, price) {
+  const p = account && account.view && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
+  if (!p || Math.sign(o.qty) === Math.sign(p.qty)) return '';
+  const n = Math.min(Math.abs(o.qty), Math.abs(p.qty));
+  const net = n * Math.sign(p.qty) * (price - p.entry) * (state.trading ? state.trading.multiplier : 2) - n * 2 * (CONTEST_FEE + BROKER_FEE);
+  return ` · 체결되면 ${net >= 0 ? '+' : ''}${fmtMoney(net)} (계좌 ${fmtSigned(net / account.capital, 3)})`;
+}
+const orderTitle = (o) => `지정가 ${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}${fillPnl(o, o.price)} · 끌어서 정정`;
+function renderOrderLines(pending) {
+  const want = new Map((pending || []).filter((o) => o.limit).map((o) => [o.number, o]));
+  orderLines.forEach((v, n) => { if (!want.has(n)) { series.removePriceLine(v.line); orderLines.delete(n); } });
+  want.forEach((o, n) => {
+    if (orderDrag && orderDrag.number === n) return;  // 끄는 중에는 화면의 선을 그대로 둔다
+    const opts = { price: o.price, color: token('--accent'), lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: orderTitle(o) };
+    if (orderLines.has(n)) orderLines.get(n).line.applyOptions(opts);
+    else orderLines.set(n, { line: series.createPriceLine(opts), order: o });
+    orderLines.get(n).order = o;
+  });
+}
+(function () {
+  const wrap = $('chart-wrap');
+  const yOf = (e) => e.clientY - $('chart').getBoundingClientRect().top;
+  const near = (e) => {  // 마우스가 위아래 6px 안에 있는 주문 선
+    for (const [n, v] of orderLines) {
+      const y = series.priceToCoordinate(v.order.price);
+      if (y != null && Math.abs(y - yOf(e)) <= 6) return { number: n, order: v.order };
+    }
+    return null;
+  };
+  wrap.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.shiftKey) return;
+    const hit = near(e);
+    if (!hit) return;
+    e.stopPropagation();
+    e.preventDefault();
+    orderDrag = { ...hit, price: hit.order.price };
+    try { wrap.setPointerCapture(e.pointerId); } catch (err) { /* 잡지 못해도 차트 안에서는 그대로 끌린다 */ }
+    const move = (ev) => {
+      ev.stopPropagation();
+      const p = series.coordinateToPrice(yOf(ev));
+      if (p == null) return;
+      orderDrag.price = Math.round(p * 4) / 4;
+      orderLines.get(orderDrag.number).line.applyOptions({ price: orderDrag.price, title: `→ ${fmtPrice(orderDrag.price)}${fillPnl(orderDrag.order, orderDrag.price)}` });
+    };
+    const up = async (ev) => {
+      ev.stopPropagation();
+      wrap.removeEventListener('pointermove', move, true);
+      const { number, order, price } = orderDrag;
+      const back = () => { orderDrag = null; renderOrderLines([...orderLines.values()].map((v) => v.order)); };
+      if (price === order.price) return back();
+      // 지금 가격을 넘겨 놓으면(매도인데 시세 아래, 매수인데 시세 위) 바로 체결되므로 한 번 묻는다
+      const now = state.quote ? state.quote.price : null;
+      const crosses = now != null && (order.qty < 0 ? price <= now : price >= now);
+      if (crosses && !await ask(`지정가 ${fmtPrice(order.price)} → ${fmtPrice(price)}${fillPnl(order, price).replace(' · ', '\n')}\n지금 가격(${fmtPrice(now)})을 넘는 가격이라 바로 체결될 수 있습니다. 정정할까요?`, '지정가 정정')) return back();
+      try {
+        const r = await post('/api/live/modify', { number, price });
+        orderLines.get(number).line.applyOptions({ title: `정정 중 ${fmtPrice(r.price)}` });
+      } catch (err) {
+        notice('정정하지 못했습니다: ' + err.message);
+      }
+      orderDrag = null;
+      api('/api/live').then(renderLive).catch(() => {});
+    };
+    wrap.addEventListener('pointermove', move, true);
+    wrap.addEventListener('pointerup', up, { capture: true, once: true });
+  }, true);
+  // 선 위에서는 위아래 화살표 커서. 끄는 동안 차트가 같이 끌리지 않게 마우스 이벤트도 막는다
+  wrap.addEventListener('pointermove', (e) => { if (!orderDrag) wrap.style.cursor = near(e) ? 'ns-resize' : ''; });
+  ['mousedown', 'mousemove', 'mouseup'].forEach((t) => wrap.addEventListener(t, (e) => {
+    if (orderDrag || (t === 'mousedown' && e.button === 0 && !e.shiftKey && near(e))) e.stopPropagation();
+  }, true));
+  // 우클릭: 그 높이의 가격으로 지정가 정리(가격 칸을 채우고 지정가 정리 버튼과 같은 확인 창)
+  wrap.addEventListener('contextmenu', (e) => {
+    const p = series.coordinateToPrice(yOf(e));
+    if (p == null) return;
+    e.preventDefault();
+    $('limit-price').value = Math.round(p * 4) / 4;
+    if ($('limit-btn').disabled) return notice('대회 시작부터 주문할 수 있습니다.');
+    $('limit-btn').click();
+  });
+})();
+
 chart.subscribeClick((p) => {
   if (!draw.tool) {
     select(hitTest(p.point));  // 도구가 꺼져 있으면 누른 것을 고른다(빈 곳이면 고르기 풀기)
@@ -551,7 +649,7 @@ function renderWhy(c, d) {
     const last = c.trades.find((t) => t.why);
     body = whyBlock('조건', null, (last && (c.scalp || c.hourly) ? [['마지막 판단', `${fmtTime(last.time)} · ${last.why}`, null]] : []).concat(c.explain));
   }
-  const next = c.scalp ? '평일 뉴욕 9:30 ~ 16시, 1분봉 마감마다' : c.hourly ? '매시 정각(1시간봉 마감마다, CME 쉬는 때 제외)' : `${c.next_intraday ? `장중 ${fmtTime(c.next_intraday)} · ` : ''}일봉 ${fmtTime(d.next_decision)}`;
+  const next = c.scalp ? '한국 평일 밤 22:30 ~ 05:00, 1분봉 마감마다' : c.hourly ? '매시 정각(1시간봉 마감마다, CME 쉬는 때 제외)' : `${c.next_intraday ? `장중 ${fmtTime(c.next_intraday)} · ` : ''}일봉 ${fmtTime(d.next_decision)}`;
   $('why').innerHTML = `<div class="why-head"><span class="pos-big">${position(c.contracts)}</span><span class="why-acct">`
     + (c.contracts && c.entry ? `진입 ${fmtPrice(c.entry)} · <b class="${tone(pnl)}">${fmtMoney(pnl)}</b><br>` : '')
     + `가상 계좌 <b class="${tone(r)}">${fmtSigned(r)}</b>`
@@ -572,6 +670,8 @@ function renderQuote() {
   $('change').className = 'change ' + tone(q.diff);
   $('change').textContent = `${q.diff >= 0 ? '+' : ''}${fmtPrice(q.diff)} (${fmtSigned(change)})`;
   document.title = `${fmtPrice(q.price)} ${q.symbol} | MNQ Trader`;
+  fillLimit();
+  renderSize();
   renderSide();
   renderAccount();
 }
@@ -594,13 +694,18 @@ function renderLive(d) {
     pick.innerHTML = Object.entries(d.choices).map(([k, n]) => `<option value="${k}"${k === d.candidate ? ' selected' : ''}>${n.split(' · ')[0]}</option>`).join('');
   }
   $('live-note').textContent = d.started ? '' : `${fmtTime(d.start)} 대회 시작부터`;
-  const orders = d.orders.slice(0, 3).map((o) => `<tr><td>${fmtTime(o.time)}</td><td>${o.ok ? `<b class="${tone(o.qty)}">${o.manual ? '직접 ' : o.filler ? '횟수 채우기 ' : ''}${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}</b> (${o.from} → ${o.to})` : `<span class="c-down">실패</span> ${o.error || ''}`}</td></tr>`).join('');
+  const orders = d.orders.slice(0, 3).map((o) => `<tr><td>${fmtTime(o.time)}</td><td>${o.ok ? `<b class="${tone(o.qty)}">${o.limit ? `지정가 ${fmtPrice(o.price)} ` : o.manual ? '직접 ' : o.filler ? '횟수 채우기 ' : ''}${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}</b> (${o.from} → ${o.to})` : `<span class="c-down">실패</span> ${o.error || ''}`}</td></tr>`).join('');
   const t = $('auto-toggle');
   t.textContent = d.enabled ? '자동 주문 켜짐' : '자동 주문 꺼짐';
   t.classList.toggle('active', d.enabled);
   t.setAttribute('aria-pressed', d.enabled);
   t.dataset.on = d.enabled;
-  $('trade-buttons').querySelectorAll('button').forEach((b) => {
+  $('size').max = d.max_contracts;  // 서버의 최대 계약 수(안전장치)까지만
+  renderOrderLines(d.pending);
+  const n = (d.pending || []).length;
+  $('cancel-pending').hidden = !n;
+  $('cancel-pending').textContent = `미체결 주문 취소 (${n}건)`;
+  document.querySelectorAll('#trade-buttons button, #limit-btn, #account-flat').forEach((b) => {
     b.disabled = !d.started;
     b.title = d.started ? '' : '대회 시작부터 누를 수 있습니다';
   });
@@ -608,33 +713,107 @@ function renderLive(d) {
     ['목표 / 실제', d.target == null ? '-' : `${position(d.target)} / ${position(d.actual)}`],
     ['이번 주 체결', d.week == null ? '-' : `<b class="${d.week >= d.min_weekly ? 'c-up' : ''}">${d.week}</b> / ${d.min_weekly}건 <small>(모자라면 금요일 뉴욕 14시부터 채움)</small>`],
     ['상태', d.error ? `<span class="c-down">${d.error}</span>` : d.note || '-'],
-  ]) + (orders ? `<table class="trend-table"><tbody>${orders}</tbody></table>` : '<p class="empty">아직 주문이 없습니다.</p>');
+  ].concat((d.pending || []).length ? [['미체결', d.pending.map((o) => `<b class="${tone(o.qty)}">${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}</b>`
+    + (o.limit ? ` @ ${fmtPrice(o.price)}` : ' 시장가')).join('<br>') + '<button class="pending-cancel" data-cancel>취소</button>']] : [])) + (orders ? `<table class="trend-table"><tbody>${orders}</tbody></table>` : '<p class="empty">아직 주문이 없습니다.</p>');
 }
 
 // 직접 주문: 시장가로 바로 나가고 자동 주문은 꺼진다(켜 두면 30초 뒤 목표 계약 수로 되돌리기 때문)
 $('trade-buttons').addEventListener('click', async (e) => {
   const b = e.target.closest('button');
   if (!b) return;
-  const flat = b.hasAttribute('data-flatten'), qty = Number(b.dataset.qty);
+  const flat = b.hasAttribute('data-flatten'), qty = Number(b.dataset.qty) * Number($('size').value);
   const est = flat ? (account ? account.view : []).map(closeEstimate) : [];
-  if (!confirm(flat ? `${est.length ? est.map((x) => x.text).join('\n\n') + '\n\n' : '들고 있는 포지션이 없습니다.\n'}모든 포지션을 시장가로 정리하고 자동 주문을 멈출까요?`
-    : `MNQ ${Math.abs(qty)}계약을 시장가로 ${qty > 0 ? '매수' : '매도'}할까요?\n자동 주문은 꺼집니다(아이콘 메뉴에서 다시 켜면 목표 계약 수로 되돌립니다).`)) return;
-  b.disabled = true;
+  if (b.hasAttribute('data-flip')) {  // 뒤집기: 계약 수는 서버가 주문 직전의 실제 포지션으로 정한다
+    const p = account && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
+    if (!p) return notice('뒤집을 포지션이 없습니다.');
+    const now = position(p.qty).replace(/<[^>]+>/g, ''), next = position(-p.qty).replace(/<[^>]+>/g, '');
+    if (!await ask(`${now} → ${next}: 시장가 ${p.qty > 0 ? '매도' : '매수'} ${2 * Math.abs(p.qty)}계약 한 건\n\n`
+      + `지금 포지션을 닫는 몫\n${closeEstimate(p).text}\n새 ${next.split(' ')[0]} 진입에 수수료 $${(CONTEST_FEE + BROKER_FEE) * Math.abs(p.qty)} 더\n\n`
+      + '자동 주문은 꺼집니다(켜 두면 30초 뒤 목표 계약 수로 되돌리기 때문).', '포지션 뒤집기')) return;
+    try {
+      await sending(b, () => post('/api/live/order', { flip: true }));
+    } catch (err) {
+      notice('주문하지 못했습니다: ' + err.message);
+    }
+    return afterOrder();
+  }
+  if (!await ask(flat ?`${est.length ? est.map((x) => x.text).join('\n\n') + '\n\n' : '들고 있는 포지션이 없습니다.\n'}모든 포지션을 시장가로 정리하고 자동 주문을 멈출까요?`
+    : `MNQ ${Math.abs(qty)}계약을 시장가로 ${qty > 0 ? '매수' : '매도'}할까요?\n자동 주문은 꺼집니다(아이콘 메뉴에서 다시 켜면 목표 계약 수로 되돌립니다).`, flat ? '포지션 정리' : '직접 주문')) return;
   try {
-    await (flat ? post('/api/live/flatten', {}) : post('/api/live/order', { qty }));
+    await sending(b, () => (flat ? post('/api/live/flatten', {}) : post('/api/live/order', { qty })));
     if (flat && est.length) closed = est.map((x) => x.html).join('<br>');
   } catch (err) {
-    alert('주문하지 못했습니다: ' + err.message);
+    notice('주문하지 못했습니다: ' + err.message);
   }
-  api('/api/live').then(renderLive).catch(() => {});
-  tickAccount();
+  afterOrder();
 });
+
+// 주문 뒤: 주문 칸은 바로, 계좌 칸은 바로·1초·3초 뒤에 다시 읽는다(시장가는 보통 1초 안에 체결돼 5초 주기를 기다리지 않게)
+function afterOrder() {
+  api('/api/live').then(renderLive).catch(() => {});
+  [0, 1000, 3000].forEach((ms) => setTimeout(tickAccount, ms));
+}
+// 주문을 보내는 동안 누른 버튼에 '주문 중…'을 띄운다(끝나면 원래 글자로)
+async function sending(b, job) {
+  const text = b.innerHTML;
+  b.disabled = true;
+  b.textContent = '주문 중…';
+  try { return await job(); } finally { b.innerHTML = text; renderSize(); }
+}
+
+// 미체결 주문 취소: 주문 칸의 버튼(미체결이 있을 때만 보인다)과 상태 줄의 [취소]가 같이 쓴다
+async function cancelPending() {
+  if (!await ask('미체결 주문을 모두 취소할까요?', '미체결 취소')) return;
+  try {
+    const r = await post('/api/live/cancel', {});
+    notice(`${r.canceled}건을 취소했습니다.`);
+  } catch (err) {
+    notice('취소하지 못했습니다: ' + err.message);
+  }
+  afterOrder();
+}
+$('cancel-pending').addEventListener('click', cancelPending);
+
+// 비중 막대: 계약 수와 그 노출(계약 가치 ÷ 평가 자산). 매수·매도 버튼 글자도 같이 바꾼다
+function renderSize() {
+  const n = Number($('size').value), q = state.quote, eq = account ? (account.cash ?? account.deposit) : null;
+  const expo = q && eq ? n * q.price * (state.trading ? state.trading.multiplier : 2) / eq : null;
+  $('size-out').innerHTML = `<b>${n}계약</b>` + (expo ? ` · 계좌의 ${expo.toFixed(2)}배 (지수 1% = $${Math.round(expo * eq / 100).toLocaleString('en-US')})` : '');
+  document.querySelector('#trade-buttons .buy').textContent = `매수 ${n}계약`;
+  document.querySelector('#trade-buttons .sell').textContent = `매도 ${n}계약`;
+}
+$('size').addEventListener('input', renderSize);
+
+$('account-flat').addEventListener('click', () => $('trade-buttons').querySelector('[data-flatten]').click());  // 같은 확인 창·같은 주문
+
+// 지정가 정리: 지금 포지션 전부를 적은 가격의 지정가 한 건으로. 체결될 때까지는 주문 칸에 미체결로 남고 거기서 취소한다
+$('limit-btn').addEventListener('click', async () => {
+  const p = account && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
+  if (!p) return notice('정리할 포지션이 없습니다.');
+  const price = Number($('limit-price').value);
+  if (!(price > 0) || Math.round(price * 4) !== price * 4) return notice('가격은 0.25 단위로 적어 주세요.');
+  const side = p.qty > 0 ? '매도' : '매수', worse = p.qty > 0 ? price < p.price : price > p.price;
+  if (!await ask(`${side} ${Math.abs(p.qty)}계약 지정가 ${fmtPrice(price)}`
+    + (worse ? '\n※ 지금 가격보다 불리한 가격이라 바로 체결될 수 있습니다' : '\n가격이 여기에 닿아야 체결됩니다') + '\n\n'
+    + `체결되면\n${closeEstimate(p, price).text}\n\n자동 주문은 꺼집니다(켜 두면 체결 뒤 목표 계약 수로 다시 들기 때문).`, '지정가 정리')) return;
+  try {
+    await sending($('limit-btn'), () => post('/api/live/limit', { price }));
+  } catch (err) {
+    notice('주문하지 못했습니다: ' + err.message);
+  }
+  afterOrder();
+});
+// 처음 시세가 오면 지정가 칸에 지금 가격을 채워 둔다(사용자가 고친 값은 건드리지 않는다)
+const fillLimit = () => { if (state.quote && !$('limit-price').value) $('limit-price').value = state.quote.price; };
+$('limit-now').addEventListener('click', () => { if (state.quote) $('limit-price').value = state.quote.price; });
+
+$('live').addEventListener('click', (e) => { if (e.target.closest('[data-cancel]')) cancelPending(); });
 
 // 대회 매매법 바꾸기: 자동 주문이 켜져 있으면 30초 안에 새 매매법의 목표 계약 수로 맞추는 주문이 나가므로 한 번 묻는다
 $('live-pick').addEventListener('change', async (e) => {
   const key = e.target.value;
-  if (!confirm(`대회 매매법을 "${e.target.selectedOptions[0].text}"(으)로 바꿀까요?
-자동 주문이 켜져 있으면 30초 안에 그 매매법의 목표 계약 수로 맞추는 주문이 나갑니다.`)) {
+  if (!await ask(`대회 매매법을 "${e.target.selectedOptions[0].text}"(으)로 바꿀까요?
+자동 주문이 켜져 있으면 30초 안에 그 매매법의 목표 계약 수로 맞추는 주문이 나갑니다.`, '대회 매매법 바꾸기')) {
     api('/api/live').then(renderLive).catch(() => {});
     return;
   }
@@ -643,18 +822,18 @@ $('live-pick').addEventListener('change', async (e) => {
     state.candidate = key;
     tickTrading();
   } catch (err) {
-    alert('바꾸지 못했습니다: ' + err.message);
+    notice('바꾸지 못했습니다: ' + err.message);
   }
 });
 
 // 자동 주문 켜고 끄기. 켜면 30초 안에 실제 포지션을 목표 계약 수에 맞추는 주문이 나갈 수 있어 한 번 묻는다(끄기는 포지션을 건드리지 않는다)
 $('auto-toggle').addEventListener('click', async () => {
   const on = $('auto-toggle').dataset.on !== 'true';
-  if (on && !confirm('자동 주문을 켤까요?\n30초 안에 실제 포지션을 목표 계약 수에 맞추는 시장가 주문이 나갈 수 있습니다.')) return;
+  if (on && !await ask('자동 주문을 켤까요?\n30초 안에 실제 포지션을 목표 계약 수에 맞추는 시장가 주문이 나갈 수 있습니다.', '자동 주문 켜기')) return;
   try {
     renderLive(await post('/api/live/enabled', { on }));
   } catch (err) {
-    alert('바꾸지 못했습니다: ' + err.message);
+    notice('바꾸지 못했습니다: ' + err.message);
   }
 });
 
@@ -668,23 +847,27 @@ function renderAccount() {
   const pos = a.positions.map((p) => {
     const price = q && q.symbol === p.symbol ? q.price : p.price;
     const pnl = q && q.symbol === p.symbol ? p.qty * mult * (price - p.entry) : p.pnl;
-    return { ...p, price, pnl, roe: p.margin ? pnl / p.margin : null, of_capital: pnl / a.capital };
+    return { ...p, price, pnl, net: pnl - closeFee(p), roe: p.margin ? pnl / p.margin : null, of_capital: pnl / a.capital };
   });
   a.view = pos;  // 정리 버튼이 실시간 가격으로 다시 계산한 손익을 쓰게
   renderRealEntry(pos.find((p) => q && p.symbol === q.symbol));
   const pnl = pos.reduce((s, p) => s + p.pnl, 0);
-  const equity = a.deposit + pnl;
+  const equity = (a.cash ?? a.deposit) + pnl;  // cash = 예탁금 + 청산손익 - 증권사 수수료
+  // 대회는 증권사 수수료와 별개로 체결 1계약당 $1을 더 뺀다. 증권사 수수료도 체결 1계약당 $1이라 같은 금액으로 본다
+  const contest = equity - (a.fees || 0);
   $('account-note').textContent = `${fmtTime(a.at)} 조회`;
   $('account-sum').innerHTML = [
     ['평가 자산', `<b>${fmtMoney(equity)}</b>`],
-    ['대회 수익률', `<b class="${tone(equity - a.capital)}">${fmtSigned(equity / a.capital - 1)}</b>`],
+    ['대회 수익률', `<b class="${tone(contest - a.capital)}" title="평가 자산에서 대회 차감(체결 1계약당 $1, 지금까지 ${fmtMoney(a.fees || 0)})을 더 뺀 값">${fmtSigned(contest / a.capital - 1, 3)}</b>`],
+    ['실현 손익', `<b class="${tone(a.realized)}">${fmtMoney(a.realized || 0)}</b> <small>(수수료 ${fmtMoney(a.fees || 0)})</small>`],
     ['미실현 손익', `<b class="${tone(pnl)}">${fmtMoney(pnl)}</b>`],
     ['사용 증거금', fmtMoney(a.margin, 0)],
   ].map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
   $('account-pos').innerHTML = pos.length ? `<table class="trend-table account-table"><thead><tr><th>종목</th><th>포지션</th><th>진입가</th><th>현재가</th>
-    <th title="평가 자산이 증거금까지 줄어드는 가격(추정). LS의 실제 반대매매 기준과 다를 수 있습니다">청산가(추정)</th><th>미실현 손익 (증거금 대비)</th><th>계좌 대비</th><th>증거금</th></tr></thead><tbody>${pos.map((p) =>
+    <th title="평가 자산이 증거금까지 줄어드는 가격(추정). LS의 실제 반대매매 기준과 다를 수 있습니다">청산가(추정)</th><th>미실현 손익 (증거금 대비)</th><th title="지금 정리하면: 미실현 손익 - 대회 차감(체결 1계약당 매수·매도 각 $1) - 증권사 수수료">수수료 뺀 손익 (계좌 대비)</th><th>계좌 대비</th><th>증거금</th></tr></thead><tbody>${pos.map((p) =>
     `<tr><td><b>${p.symbol}</b></td><td>${position(p.qty)}</td><td>${fmtPrice(p.entry)}</td><td>${fmtPrice(p.price)}</td><td>${p.liq ? fmtPrice(p.liq) : '없음 <small>(계좌 충분)</small>'}</td>
-    <td><b class="${tone(p.pnl)}">${fmtMoney(p.pnl)}</b> <span class="${tone(p.pnl)}">(${fmtSigned(p.roe)})</span></td><td class="${tone(p.pnl)}">${fmtSigned(p.of_capital, 3)}</td><td>${fmtMoney(p.margin, 0)}</td></tr>`).join('')}</tbody></table>`
+    <td><b class="${tone(p.pnl)}">${fmtMoney(p.pnl)}</b> <span class="${tone(p.pnl)}">(${fmtSigned(p.roe)})</span></td>
+    <td><b class="${tone(p.net)}">${fmtMoney(p.net)}</b> <span class="${tone(p.net)}">(${fmtSigned(p.net / a.capital, 3)})</span></td><td class="${tone(p.pnl)}">${fmtSigned(p.of_capital, 3)}</td><td>${fmtMoney(p.margin, 0)}</td></tr>`).join('')}</tbody></table>`
     : '<p class="empty">들고 있는 포지션이 없습니다.</p>';
 }
 
@@ -707,16 +890,18 @@ function renderRealEntry(p) {
   ]) : rows([['실제 진입', '포지션 없음']].concat(closed ? [['정리 결과', closed]] : []));
 }
 
-// 지금 정리하면 수수료 빼고 얼마인가. 대회는 체결 1계약당 매수·매도 각 $1을 수익률에서 빼고(진입 + 청산 = $2),
-// 증권사 수수료는 LS가 포지션에 적어 준 값(CsgnCmsn)만 넣는다. 시장가라 실제 체결가는 조금 다를 수 있다
-const CONTEST_FEE = 1;
+// 이 포지션을 수수료 빼고 얼마에 닫는가: 체결 1계약당 대회 차감 $1 + 증권사 수수료 $1(10-19 LS 모의계좌 왕복 $2 확인), 진입과 청산 두 번.
+// 진입 때의 증권사 수수료는 이미 평가 자산에서 빠져 있지만, 이 매매 한 번의 순손익으로 보이게 함께 뺀다. 시장가라 실제 체결가는 조금 다를 수 있다
+const CONTEST_FEE = 1, BROKER_FEE = 1;
 let closed = '';
-function closeEstimate(p) {
-  const fee = 2 * CONTEST_FEE * Math.abs(p.qty) + (p.fee || 0), net = p.pnl - fee, cap = account.capital;
+const closeFee = (p) => 2 * (CONTEST_FEE + BROKER_FEE) * Math.abs(p.qty);
+function closeEstimate(p, at) {  // at: 지정가로 닫을 가격(없으면 지금 가격)
+  const pnl = at == null ? p.pnl : p.qty * (state.trading ? state.trading.multiplier : 2) * (at - p.entry);
+  const fee = closeFee(p), net = pnl - fee, cap = account.capital;
   const sign = (v) => (v >= 0 ? '+' : '') + fmtMoney(v);
   return {
-    text: `${p.symbol} ${position(p.qty).replace(/<[^>]+>/g, '')}: 진입 ${fmtPrice(p.entry)} → 지금 ${fmtPrice(p.price)}\n`
-      + `가격 손익 ${sign(p.pnl)}\n수수료 -${fmtMoney(fee)} (대회 차감 $${2 * CONTEST_FEE}×${Math.abs(p.qty)}계약${p.fee ? ` + 증권사 ${fmtMoney(p.fee)}` : ''})\n`
+    text: `${p.symbol} ${position(p.qty).replace(/<[^>]+>/g, '')}: 진입 ${fmtPrice(p.entry)} → ${at == null ? `지금 ${fmtPrice(p.price)}` : `지정가 ${fmtPrice(at)} (지금 ${fmtPrice(p.price)})`}\n`
+      + `가격 손익 ${sign(pnl)}\n수수료 -${fmtMoney(fee)} (진입·청산 각각 대회 차감 $${CONTEST_FEE} + 증권사 $${BROKER_FEE}, ${Math.abs(p.qty)}계약)\n`
       + `수수료 뺀 손익 ${sign(net)} · 계좌 대비 ${fmtSigned(net / cap, 3)} · 증거금 대비 ${fmtSigned(p.margin ? net / p.margin : null)}`,
     html: `<b class="${tone(net)}">${sign(net)}</b> <small>(수수료 ${fmtMoney(fee)} 뺌 · 계좌 ${fmtSigned(net / cap, 3)}, 누른 때 가격 기준 예상)</small>`,
   };

@@ -401,6 +401,17 @@ td .dot.short { background: var(--short); }
 .doc-dialog header button:hover { background: var(--border); color: var(--text); }
 .doc-dialog header button.text { font-size: 13px; }
 
+/* 작은 확인 창(차트 화면의 주문·설정 확인) */
+.ask-dialog { width: min(440px, calc(100vw - 32px)); }
+.ask-dialog form { display: contents; }
+.ask-dialog header { min-height: 52px; }
+.ask-text { margin: 0; padding: 18px 24px; color: var(--text-2); font-size: 14px; line-height: 1.7; white-space: pre-line; }
+.ask-buttons { display: flex; justify-content: flex-end; gap: 8px; padding: 0 24px 20px; }
+.ask-buttons button { padding: 8px 18px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
+.ask-buttons button:hover { border-color: var(--text-3); }
+.ask-buttons .primary { border-color: var(--accent); background: var(--accent); color: var(--on-solid); font-weight: 700; }
+.ask-buttons .primary:hover { filter: brightness(1.1); }
+
 .doc { overflow-y: auto; padding: 4px 26px 26px; font-size: 15px; line-height: 1.75; }
 .card > .doc { padding: 0; }
 .doc h3 { margin: 26px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); font-size: 17px; }
@@ -922,11 +933,39 @@ dl.info dd small { color: var(--text-3); }
 }
 .trade-buttons .buy { border-color: var(--long); background: color-mix(in srgb, var(--long) 18%, var(--panel)); color: var(--up-text); }
 .trade-buttons .sell { border-color: var(--short); background: color-mix(in srgb, var(--short) 18%, var(--panel)); color: var(--down-text); }
-.trade-buttons .flat { grid-column: 1 / -1; font-size: 15px; }
+.trade-buttons .flat { font-size: 15px; }
+.size-bar { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 4px 12px; margin-bottom: 12px; font-size: 14px; }
+.size-bar label { color: var(--text-2); font-weight: 700; }
+.size-bar input { width: 100%; accent-color: var(--accent); }
+.size-bar output { grid-column: 2; color: var(--text-3); font-size: 13px; font-variant-numeric: tabular-nums; }
+.size-bar output b { color: var(--text); }
+.cancel-pending {
+  width: 100%; margin: -6px 0 14px; padding: 9px 16px; border: 1px solid var(--short); border-radius: 10px;
+  background: color-mix(in srgb, var(--short) 14%, var(--panel)); color: var(--down-text); font: inherit; font-weight: 700; cursor: pointer;
+}
+.cancel-pending:hover { filter: brightness(1.15); }
+.limit-close { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; margin: -6px 0 14px; }
+.limit-close input {
+  min-width: 0; padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--sunken); color: var(--text); font: inherit; font-variant-numeric: tabular-nums;
+}
+.limit-close button { padding: 9px 16px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
+.limit-close button:hover:not(:disabled) { border-color: var(--text-3); }
+.limit-close button:disabled { color: var(--text-3); cursor: default; }
+.pending-cancel { margin-left: 6px; padding: 2px 10px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-2); font: inherit; font-size: 12px; cursor: pointer; }
+.pending-cancel:hover { border-color: var(--short); color: var(--down-text); }
+.trade-buttons .flip { border-color: var(--accent); color: var(--flat-text); }
 .trade-buttons button:hover:not(:disabled) { filter: brightness(1.15); }
 .trade-buttons button:disabled { opacity: .45; cursor: not-allowed; }
 .why-foot { color: var(--text-3); font-size: 13px; }
 .why-foot { margin: 12px 0 0; }
+
+/* 주문 기록 */
+.order-stats { grid-template-columns: repeat(4, 1fr); margin-top: 0; }
+@media (max-width: 760px) { .order-stats { grid-template-columns: repeat(2, 1fr); } }
+.table-scroll { overflow-x: auto; }
+.order-table { width: 100%; }
+.order-table th, .order-table td { white-space: nowrap; }
 .account-panel { flex: none; max-height: 34vh; overflow: auto; padding: 12px 16px 14px; border-top: 1px solid var(--border); background: var(--panel); }
 .account-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 28px; margin-bottom: 10px; }
 .account-head h2 { margin: 0; font-size: 16px; font-weight: 700; }
@@ -935,6 +974,12 @@ dl.info dd small { color: var(--text-3); }
 .account-sum div { display: flex; gap: 8px; align-items: baseline; }
 .account-sum dt { color: var(--text-3); font-size: 13px; }
 .account-sum dd { margin: 0; }
+.account-flat {
+  margin-left: auto; padding: 5px 14px; border: 1px solid var(--border-strong); border-radius: 999px;
+  background: var(--panel); color: var(--text); font: inherit; font-size: 13px; cursor: pointer;
+}
+.account-flat:hover:not(:disabled) { border-color: var(--short); color: var(--down-text); }
+.account-flat:disabled { color: var(--text-3); cursor: default; }
 .account-table { width: 100%; }
 .account-table th, .account-table td { white-space: nowrap; }
 .card-actions .auto-toggle.active { background: var(--long); border-color: var(--long); color: #fff; }

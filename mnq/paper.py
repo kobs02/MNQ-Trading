@@ -20,6 +20,7 @@ from . import config, console, ls, strategies
 
 log = logging.getLogger(__name__)
 NY = ZoneInfo("America/New_York")
+KST = ZoneInfo("Asia/Seoul")
 PATH = config.STORE / "paper.json"
 _lock = threading.Lock()
 _state = None
@@ -187,15 +188,20 @@ def _minute_frame():
 
 
 def _scalp(key, acct, ny, price, now):
-    """스캘핑 갈래(관찰용): 오늘 뉴욕 9:30부터의 LS 1분봉에 과거 시험과 같은 scalp_trades를 돌려, 지금 들고 있어야 할 방향을 따른다.
+    """스캘핑 갈래(관찰용): 이번 한국 시각 밤 세션(config의 kst, 22:30 ~ 05:00) 시작부터의 LS 1분봉에 과거 시험과 같은 scalp_trades를 돌려,
+    지금 들고 있어야 할 방향을 따른다. 끝난 뒤에도 마지막 매매가 끝날 때까지(최대 hold분) 지켜보고 그 뒤에 정리한다.
     가상 체결은 그 순간의 가격이라 익절·손절 가격과 조금 다르다."""
     cfg = config.CANDIDATES[key]["scalp"]
     held = acct.get("parts", {}).get("scalp", 0)
-    if ny.weekday() >= 5 or not (9 * 60 + 30 <= ny.hour * 60 + ny.minute < 17 * 60):
+    a, b = cfg["kst"]
+    kst = datetime.now(KST)
+    m = kst.hour * 60 + kst.minute
+    start = kst.replace(hour=a // 60, minute=a % 60, second=0, microsecond=0) - timedelta(days=1 if m < a else 0)  # 이번(또는 방금 끝난) 세션의 시작
+    if start.weekday() >= 5 or kst >= start + timedelta(days=1 if a > b else 0, minutes=b - a + cfg["hold"]):
         if held:
-            _set(key, acct, "scalp", 0, price, now, {"date": f"{ny:%Y-%m-%d}", "expo": 0.0, "why": "장 마감 정리"})
+            _set(key, acct, "scalp", 0, price, now, {"date": f"{ny:%Y-%m-%d}", "expo": 0.0, "why": "세션 끝 정리"})
         return
-    trades = strategies.scalp_trades(_minute_frame(), **cfg, since=pd.Timestamp(ny.date()) + pd.Timedelta(hours=9, minutes=30))
+    trades = strategies.scalp_trades(_minute_frame(), **cfg, since=pd.Timestamp(start.astimezone(NY).replace(tzinfo=None)))
     last = trades[-1] if trades else None
     want = last["side"] if last and last["t_out"] is None else 0
     if want != held:

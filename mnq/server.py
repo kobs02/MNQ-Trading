@@ -64,6 +64,11 @@ def api_live():
     return jsonify(live.get_live())
 
 
+@app.get("/api/live/history")
+def api_live_history():
+    return jsonify(live.history())
+
+
 @app.get("/api/account")
 def api_account():
     return jsonify(live.account())
@@ -78,7 +83,25 @@ def _json():
 
 @app.post("/api/live/order")
 def api_live_order():
-    return jsonify(live.manual(_json().get("qty")))
+    body = _json()
+    return jsonify(live.manual(body.get("qty"), flip=body.get("flip") is True))
+
+
+@app.post("/api/live/limit")
+def api_live_limit():
+    return jsonify(live.limit_close(_json().get("price")))
+
+
+@app.post("/api/live/modify")
+def api_live_modify():
+    body = _json()
+    return jsonify(live.modify_limit(str(body.get("number") or ""), body.get("price")))
+
+
+@app.post("/api/live/cancel")
+def api_live_cancel():
+    _json()
+    return jsonify({"canceled": live.cancel_pending()})
 
 
 @app.post("/api/live/enabled")

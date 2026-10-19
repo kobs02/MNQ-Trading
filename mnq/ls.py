@@ -24,9 +24,10 @@ PATHS = {  # TR → 주소
     "CIDBQ01800": "/overseas-futureoption/accno",   # 주문내역
     "CIDBQ05300": "/overseas-futureoption/accno",   # 예탁자산
     "CIDBT00100": "/overseas-futureoption/order",   # 신규주문
+    "CIDBT00900": "/overseas-futureoption/order",   # 정정주문
     "CIDBT01000": "/overseas-futureoption/order",   # 취소주문
 }
-PER_SEC = {"o3105": 2, "CIDBT00100": 5, "CIDBT01000": 5}  # 나머지는 초당 1회
+PER_SEC = {"o3105": 2, "CIDBT00100": 5, "CIDBT00900": 5, "CIDBT01000": 5}  # 나머지는 초당 1회
 
 _session = requests.Session()
 _lock = threading.Lock()
@@ -159,9 +160,9 @@ def positions():
     return net, rows
 
 
-def orders(symbol):
-    """오늘의 주문내역."""
-    data, _ = call("CIDBQ01800", {"CIDBQ01800InBlock1": {"RecCnt": 1, "IsuCodeVal": symbol, "OrdDt": today(), "ThdayTpCode": " ",
+def orders(symbol, day=None):
+    """그날(한국 날짜 YYYYMMDD, 기본 오늘)의 주문내역. OrdDt·OrdTime도 한국 시각이다(10-19 확인)."""
+    data, _ = call("CIDBQ01800", {"CIDBQ01800InBlock1": {"RecCnt": 1, "IsuCodeVal": symbol, "OrdDt": day or today(), "ThdayTpCode": " ",
                                                          "OrdStatCode": "0", "BnsTpCode": "0", "QryTpCode": "2", "OrdPtnCode": "00",
                                                          "OvrsDrvtFnoTpCode": "A"}})
     return data.get("CIDBQ01800OutBlock2") or []
@@ -171,12 +172,45 @@ def orders(symbol):
 
 def market_order(symbol, qty):
     """시장가 신규주문. qty > 0 매수, < 0 매도. 주문번호를 돌려준다(체결 여부는 orders/positions로 확인)."""
+    return _new_order(symbol, qty, None)
+
+
+def limit_order(symbol, qty, price):
+    """지정가 신규주문(그 가격이나 더 좋은 가격에만 체결). 주문번호를 돌려준다."""
+    return _new_order(symbol, qty, price)
+
+
+def cancel(symbol, number):
+    """미체결 주문 취소(CIDBT01000). 취소 주문의 번호를 돌려준다."""
+    data, _ = call("CIDBT01000", {"CIDBT01000InBlock1": {
+        "RecCnt": 1, "OrdDt": today(), "BrnNo": " ", "IsuCodeVal": symbol, "OvrsFutsOrgOrdNo": number,
+        "FutsOrdTpCode": "3", "PrdtTpCode": " ", "ExchCode": " "}})  # 3 취소
+    done = (data.get("CIDBT01000OutBlock2") or {}).get("OvrsFutsOrdNo")
+    if not done or not done.strip("0"):
+        raise LSError(f"취소가 접수되지 않았습니다: {data.get('rsp_cd')} {data.get('rsp_msg')}")
+    return done
+
+
+def modify(symbol, number, qty, price):
+    """미체결 지정가 주문의 가격 정정(CIDBT00900). qty는 원래 주문의 방향과 미체결 수량(매수 +, 매도 -). 정정된 주문의 새 번호를 돌려준다."""
+    data, _ = call("CIDBT00900", {"CIDBT00900InBlock1": {
+        "RecCnt": 1, "OrdDt": today(), "RegBrnNo": " ", "OvrsFutsOrgOrdNo": number, "IsuCodeVal": symbol,
+        "FutsOrdTpCode": "2", "BnsTpCode": "2" if qty > 0 else "1", "FutsOrdPtnCode": "2",  # 2 정정, 2 지정가
+        "CrcyCodeVal": " ", "OvrsDrvtOrdPrc": price, "CndiOrdPrc": 0, "OrdQty": abs(int(qty)),
+        "OvrsDrvtPrdtCode": "", "DueYymm": "", "ExchCode": " "}})
+    done = (data.get("CIDBT00900OutBlock2") or {}).get("OvrsFutsOrdNo")
+    if not done or not done.strip("0"):
+        raise LSError(f"정정이 접수되지 않았습니다: {data.get('rsp_cd')} {data.get('rsp_msg')}")
+    return done
+
+
+def _new_order(symbol, qty, price):
     if not qty:
         raise ValueError("수량이 0입니다")
     data, _ = call("CIDBT00100", {"CIDBT00100InBlock1": {
         "RecCnt": 1, "OrdDt": today(), "BrnCode": " ", "IsuCodeVal": symbol, "FutsOrdTpCode": "1",  # 1 신규
-        "BnsTpCode": "2" if qty > 0 else "1", "AbrdFutsOrdPtnCode": "1",  # 1 시장가
-        "CrcyCode": " ", "OvrsDrvtOrdPrc": 0, "CndiOrdPrc": 0, "OrdQty": abs(int(qty)),
+        "BnsTpCode": "2" if qty > 0 else "1", "AbrdFutsOrdPtnCode": "1" if price is None else "2",  # 1 시장가, 2 지정가
+        "CrcyCode": " ", "OvrsDrvtOrdPrc": price or 0, "CndiOrdPrc": 0, "OrdQty": abs(int(qty)),
         "PrdtCode": " ", "DueYymm": " ", "ExchCode": " "}})
     number = (data.get("CIDBT00100OutBlock2") or {}).get("OvrsFutsOrdNo")
     if not number or not number.strip("0"):  # 성공 코드가 TR마다 달라서 주문번호로 판단한다

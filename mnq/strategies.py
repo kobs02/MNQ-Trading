@@ -43,7 +43,8 @@ def explain(key, px):
                 ("연구 결과", "2년 1시간봉: 샤프 0.04 ~ 0.21, 4주 수익+MDD가 섞기보다 나쁨 → 관찰용", False)]
     if rule == "flat":
         sc = config.CANDIDATES[key]["scalp"]
-        return [("진입", f"1분봉 종가가 직전 {sc['look']}분 고가 위 → 롱, 저가 아래 → 숏 (뉴욕 9:30 ~ 16시)", None),
+        a, b = sc["kst"]
+        return [("진입", f"1분봉 종가가 직전 {sc['look']}분 고가 위 → 롱, 저가 아래 → 숏 (한국 {a // 60}:{a % 60:02d} ~ {b // 60}:{b % 60:02d})", None),
                 ("청산", f"+{sc['tp']:g}포인트 익절 · -{sc['sl']:g}포인트 손절 · {sc['hold']}분 경과", None),
                 ("연구 결과", "승률 93%지만 1회 평균 -1.4 ~ -2.7포인트(비용 뒤) → 관찰용", False)]
     if rule == "ibs_trend":
@@ -283,17 +284,27 @@ def replay(key, px):
 
 
 # ---------- 스캘핑(관찰용): research/r5_scalp.py에서 승률이 가장 높던 설정 ----------
-# 1분봉 종가가 직전 look분 고가 위면 롱, 저가 아래면 숏(뉴욕 9:30 ~ 16시에 시작한 봉만). 다음 봉 시가에 들고 익절 tp·손절 sl(포인트)·최대 hold분.
+# 1분봉 종가가 직전 look분 고가 위면 롱, 저가 아래면 숏(신호를 보는 시간대에 시작한 봉만). 다음 봉 시가에 들고 익절 tp·손절 sl(포인트)·최대 hold분.
 # 같은 봉에서 익절·손절이 함께 닿으면 손절로 본다(r5와 같은 보수적 가정). r5는 신호마다 겹쳐 셌지만 여기서는 한 번에 하나만 든다.
-def scalp_trades(frame, look=30, tp=2.0, sl=25.0, hold=60, since=None):
+def kst_window(t, kst):
+    """뉴욕 시각(tz 없음) 색인 t의 봉이 한국 시각 [시작, 끝) 분 안이고 평일 밤 세션인가. 자정을 넘는 시간대(22:30 ~ 05:00)면
+    끝 시각만큼 당긴 날이 월 ~ 금일 때만(월 22:30 ~ 토 05:00). 서머타임이 바뀌는 시각의 애매한 봉은 뺀다."""
+    k = t.tz_localize("America/New_York", ambiguous="NaT", nonexistent="NaT").tz_convert("Asia/Seoul").tz_localize(None)
+    m, (a, b) = k.hour * 60 + k.minute, kst
+    inside = ((m >= a) | (m < b)) if a > b else ((m >= a) & (m < b))
+    return np.asarray(inside & ((k - pd.Timedelta(minutes=b if a > b else 0)).dayofweek < 5), dtype=bool)
+
+
+def scalp_trades(frame, look=30, tp=2.0, sl=25.0, hold=60, since=None, kst=None):
     """frame: 1분봉(뉴욕 시각, 봉 시작 색인, open·high·low·close, 마감된 봉만). since 뒤에 신호가 난 매매들
-    [{side, t_in, entry, t_out, exit, why}]. 아직 끝나지 않은 매매는 t_out이 None이다."""
+    [{side, t_in, entry, t_out, exit, why}]. 아직 끝나지 않은 매매는 t_out이 None이다.
+    kst가 있으면 그 한국 시각 시간대에, 없으면 뉴욕 정규장 9:30 ~ 16시(r5 연구)에 신호를 본다."""
     o, h, l, c = (frame[k].to_numpy() for k in ("open", "high", "low", "close"))
     top = frame["high"].shift(1).rolling(look).max().to_numpy()
     bottom = frame["low"].shift(1).rolling(look).min().to_numpy()
     t = frame.index
     minute = t.hour * 60 + t.minute
-    ok = (minute >= 9 * 60 + 30) & (minute < 16 * 60) & (t.dayofweek < 5)
+    ok = kst_window(t, kst) if kst else (minute >= 9 * 60 + 30) & (minute < 16 * 60) & (t.dayofweek < 5)
     if since is not None:
         ok &= t >= since
     out, i, n = [], look, len(frame)

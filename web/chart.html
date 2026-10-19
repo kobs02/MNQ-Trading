@@ -18,6 +18,7 @@
     <nav class="pages" aria-label="페이지">
       <a href="chart.html" class="active" aria-current="page">실시간 차트</a>
       <a href="paper.html">모의 운용</a>
+      <a href="orders.html">주문 기록</a>
     </nav>
     <span id="conn" class="conn" role="status">연결 중…</span>
   </header>
@@ -51,6 +52,8 @@
         <div class="account-head">
           <h2 id="account-title">LS 모의계좌 <small id="account-note"></small></h2>
           <dl id="account-sum" class="account-sum"></dl>
+          <!-- 주문 칸의 '포지션 정리'와 같은 버튼(같은 확인 창). 표는 0.5초마다 다시 그려서 버튼을 표 밖에 둔다 -->
+          <button id="account-flat" class="account-flat" type="button" title="모든 포지션을 시장가로 정리하고 자동 주문을 멈춘다">포지션 정리</button>
         </div>
         <div id="account-pos" class="account-pos"></div>
       </section>
@@ -62,10 +65,23 @@
         <h2>주문 <small id="live-note"></small>
           <span class="card-actions"><button id="auto-toggle" class="auto-toggle" aria-pressed="false">자동 주문 꺼짐</button></span></h2>
         <label class="live-pick">대회 매매법 <select id="live-pick" aria-label="대회 매매법"></select></label>
+        <!-- 직접 매수·매도의 계약 수(비중). 1계약 ≈ 계좌의 0.6배라 정수 계약으로만 고른다 -->
+        <div class="size-bar">
+          <label for="size">비중</label>
+          <input id="size" type="range" min="1" max="4" step="1" value="1">
+          <output id="size-out" for="size"></output>
+        </div>
         <div id="trade-buttons" class="trade-buttons">
           <button class="buy" data-qty="1" disabled>매수 1계약</button>
           <button class="sell" data-qty="-1" disabled>매도 1계약</button>
+          <button class="flip" data-flip disabled title="롱이면 숏으로, 숏이면 롱으로 같은 계약 수만큼 뒤집는다(시장가 한 건). 자동 주문은 꺼진다">포지션 뒤집기</button>
           <button class="flat" data-flatten disabled title="모든 포지션을 시장가로 정리하고 자동 주문을 멈춘다(켜 두면 30초 뒤 목표 계약 수로 다시 들기 때문)">포지션 정리 <small>(자동 주문 멈춤)</small></button>
+        </div>
+        <button id="cancel-pending" class="cancel-pending" type="button" hidden>미체결 주문 취소</button>
+        <div class="limit-close">
+          <input id="limit-price" type="number" step="0.25" min="0" inputmode="decimal" aria-label="지정가 정리 가격" placeholder="지정가">
+          <button id="limit-now" type="button" title="가격 칸을 지금 시장 가격(마지막 체결가)으로 바꾼다">최신 가격</button>
+          <button id="limit-btn" data-limit disabled title="지금 포지션 전부를 이 가격의 지정가 한 건으로 닫는다. 자동 주문은 꺼진다">지정가 정리</button>
         </div>
         <div id="live-pos"></div>
         <div id="live"></div>
@@ -78,6 +94,15 @@
       </section>
     </aside>
   </main>
+
+  <!-- 확인·알림 창(브라우저 confirm·alert 대신). 처음 초점은 취소에 간다(Enter 한 번으로 주문이 나가지 않게) -->
+  <dialog id="ask" class="doc-dialog ask-dialog" aria-labelledby="ask-title">
+    <form method="dialog">
+      <header><h2 id="ask-title">확인</h2></header>
+      <p id="ask-text" class="ask-text"></p>
+      <footer class="ask-buttons"><button id="ask-cancel" value="cancel">취소</button><button id="ask-ok" value="ok" class="primary">확인</button></footer>
+    </form>
+  </dialog>
 
   <script src="chart.js"></script>
   <script src="theme.js"></script>

@@ -12,7 +12,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from . import config, console, ls, paper
@@ -68,7 +68,33 @@ def set_enabled(on):
 
 
 def flatten():
-    """비상 정지: 목표를 0계약으로 바꿔 정리하고, 0이 확인되면 자동 주문을 끈다(장이 쉬는 동안에는 열릴 때까지 기다린다)."""
+    """비상 정지·화면의 '포지션 정리': 자동 주문을 끄고 미체결을 취소한 뒤 지금 포지션을 시장가로 바로 닫는다.
+    CME가 쉬는 시간(또는 대회 전)이면 목표를 0계약으로 걸어 두고, 열린 뒤 30초 확인이 닫고 0이 확인되면 자동 주문을 끈다."""
+    symbol = paper.status["symbol"]
+    if symbol and started() and market_open(datetime.now(NY)):
+        with _busy:
+            with _lock:
+                _load().update(enabled=False, flatten=False)
+                _save()
+            for o in _pending(symbol):  # 지정가가 남아 있으면 닫은 뒤에 체결돼 반대 포지션이 생길 수 있다
+                ls.cancel(symbol, o["OvrsFutsOrdNo"])
+                log.warning("LS 모의계좌: 정리 전에 미체결 주문 %s를 취소했습니다", o["OvrsFutsOrdNo"])
+            _pending(symbol)
+            actual = int(ls.positions()[0].get(symbol, 0))
+            if not actual:
+                return
+            ny = datetime.now(NY)
+            entry = {"time": int(time.time()), "day": ny.strftime("%Y-%m-%d"), "symbol": symbol, "qty": -actual, "from": actual, "to": 0,
+                     "price": paper.status["price"], "manual": True, "flatten": True}
+            try:
+                entry.update(ok=True, number=ls.market_order(symbol, -actual))
+                console.success(log, "LS 모의계좌 포지션 정리: %s %d계약 주문번호 %s · 자동 주문은 껐습니다", "매수" if actual < 0 else "매도",
+                                abs(actual), entry["number"])
+            except Exception as e:
+                entry.update(ok=False, error=str(e))
+                log.error("LS 모의계좌 포지션 정리 실패: %s", e)
+            _record(entry)
+        return
     with _lock:
         _load().update(enabled=True, flatten=True, flatten_at=int(time.time()))
         _save()
@@ -108,11 +134,13 @@ def _record(entry):
         state["orders"].append(entry)
         del state["orders"][:-1000]
         _save()
+    _account["at"] = _history["at"] = 0  # 다음 화면 조회가 5·10초 저장본이 아니라 LS의 새 값을 받게
 
 
-def manual(qty):
-    """화면의 매수(+)·매도(-) 버튼. 자동 주문을 먼저 끈다(켜 두면 30초 뒤 목표 계약 수로 되돌린다)."""
-    if type(qty) is not int or not qty:
+def manual(qty=None, flip=False):
+    """화면의 매수(+)·매도(-) 버튼. 자동 주문을 먼저 끈다(켜 두면 30초 뒤 목표 계약 수로 되돌린다).
+    flip이면 주문 직전에 읽은 실제 포지션의 반대로 뒤집는다(롱 n → 숏 n: 매도 2n 한 건)."""
+    if not flip and (type(qty) is not int or not qty):
         raise ValueError("계약 수가 올바르지 않습니다")
     symbol = paper.status["symbol"]
     if not symbol:
@@ -129,6 +157,10 @@ def manual(qty):
         if any(int(o.get("UnercQty") or 0) > 0 for o in ls.orders(symbol)):
             raise ValueError("미체결 주문이 있습니다")
         actual = int(ls.positions()[0].get(symbol, 0))
+        if flip:
+            if not actual:
+                raise ValueError("뒤집을 포지션이 없습니다")
+            qty = -2 * actual
         if abs(actual + qty) > config.LIVE["max_contracts"]:
             raise ValueError(f"주문 뒤 {actual + qty}계약이 최대({config.LIVE['max_contracts']}계약)를 넘습니다")
         entry = {"time": int(time.time()), "day": ny.strftime("%Y-%m-%d"), "symbol": symbol, "qty": qty, "from": actual, "to": actual + qty,
@@ -142,6 +174,94 @@ def manual(qty):
             log.error("LS 모의계좌 직접 주문 실패: %s %d계약 · %s", "매수" if qty > 0 else "매도", abs(qty), e)
         _record(entry)
     return entry
+
+
+def _pending(symbol):
+    """미체결 주문(LS 주문내역에서 UnercQty > 0)을 읽고 화면용으로 status["pending"]에 줄여 둔다."""
+    rows = [o for o in ls.orders(symbol) if int(o.get("UnercQty") or 0) > 0]
+    status["pending"] = [{"number": o.get("OvrsFutsOrdNo"), "qty": (1 if o.get("BnsTpCode") == "2" else -1) * int(o["UnercQty"]),
+                          "price": float(o.get("OvrsDrvtOrdPrc") or 0), "limit": o.get("AbrdFutsOrdPtnCode") == "2"} for o in rows]
+    return rows
+
+
+def limit_close(price):
+    """화면의 '지정가로 정리': 지금 포지션 전부를 그 가격의 지정가 한 건으로 닫는다. 자동 주문은 먼저 끈다
+    (켜 두면 미체결 동안은 기다리다가 체결 뒤 목표 계약 수로 다시 들기 때문). 미체결은 cancel_pending으로 취소한다."""
+    symbol = _check_price(price)
+    if not started():
+        raise ValueError("대회 시작 전에는 주문하지 않습니다")
+    ny = datetime.now(NY)
+    if not market_open(ny):
+        raise ValueError("CME가 쉬는 시간입니다")
+    with _busy:
+        with _lock:
+            _load().update(enabled=False, flatten=False)
+            _save()
+        if _pending(symbol):
+            raise ValueError("미체결 주문이 있습니다(먼저 취소하세요)")
+        actual = int(ls.positions()[0].get(symbol, 0))
+        if not actual:
+            raise ValueError("정리할 포지션이 없습니다")
+        qty = -actual
+        entry = {"time": int(time.time()), "day": ny.strftime("%Y-%m-%d"), "symbol": symbol, "qty": qty, "from": actual, "to": 0,
+                 "price": price, "manual": True, "limit": True}
+        try:
+            entry.update(ok=True, number=ls.limit_order(symbol, qty, price))
+            console.success(log, "LS 모의계좌 지정가 정리: %s %d계약 @ %.2f 주문번호 %s · 자동 주문은 껐습니다", "매수" if qty > 0 else "매도",
+                            abs(qty), price, entry["number"])
+        except Exception as e:
+            entry.update(ok=False, error=str(e))
+            log.error("LS 모의계좌 지정가 정리 실패: %s", e)
+        _record(entry)
+        _pending(symbol)
+    return entry
+
+
+def _check_price(price):
+    """지정가로 쓸 수 있는 가격인가(0.25 단위, 지금 가격에서 5% 안). 지금 종목을 돌려준다."""
+    symbol, now_px = paper.status["symbol"], paper.status["price"]
+    if type(price) not in (int, float) or price <= 0 or round(price * 4) != price * 4:
+        raise ValueError("가격은 0.25 단위의 양수여야 합니다")
+    if not symbol or not now_px:
+        raise ValueError("아직 시세를 모릅니다")
+    if abs(price / now_px - 1) > 0.05:  # 자릿수를 잘못 친 가격 막기
+        raise ValueError(f"지금 가격({now_px:,.2f})에서 5% 넘게 떨어진 가격입니다")
+    return symbol
+
+
+def modify_limit(number, price):
+    """화면에서 지정가 선을 끌어 옮기면: 그 미체결 지정가 주문의 가격을 정정한다. 정정되면 주문번호가 바뀌므로 기록도 새 번호로 고친다."""
+    symbol = _check_price(price)
+    with _busy:
+        row = next((o for o in ls.orders(symbol) if o.get("OvrsFutsOrdNo") == number and int(o.get("UnercQty") or 0) > 0), None)
+        if not row or row.get("AbrdFutsOrdPtnCode") != "2":
+            raise ValueError("정정할 미체결 지정가 주문이 없습니다(이미 체결됐거나 취소됐을 수 있습니다)")
+        qty = (1 if row.get("BnsTpCode") == "2" else -1) * int(row["UnercQty"])
+        new = ls.modify(symbol, number, qty, price)
+        console.success(log, "LS 모의계좌 지정가 정정: %s %d계약 %s → %.2f (주문번호 %s → %s)", "매수" if qty > 0 else "매도", abs(qty),
+                        row.get("OvrsDrvtOrdPrc"), price, number, new)
+        with _lock:
+            for o in _load()["orders"]:
+                if o.get("number") == number:
+                    o.update(number=new, price=price)
+            _save()
+        _pending(symbol)
+    return {"number": new, "price": price}
+
+
+def cancel_pending():
+    """화면의 '미체결 취소': 지금 종목의 미체결 주문을 모두 취소한다. 취소한 건수."""
+    symbol = paper.status["symbol"]
+    if not symbol:
+        raise ValueError("아직 종목을 모릅니다")
+    with _busy:
+        rows = _pending(symbol)
+        for o in rows:
+            ls.cancel(symbol, o["OvrsFutsOrdNo"])
+            log.warning("LS 모의계좌: 미체결 주문 %s를 취소했습니다", o["OvrsFutsOrdNo"])
+        _pending(symbol)
+    _account["at"] = 0
+    return len(rows)
 
 
 def week_fills(orders, now=None):
@@ -171,6 +291,7 @@ def _tick():
     net, _ = ls.positions()
     actual = int(net.get(symbol, 0))
     others = {s: q for s, q in net.items() if s != symbol and q}
+    pending = _pending(symbol)  # 자동 주문이 꺼져 있어도 화면에 미체결(지정가 정리 등)을 보이게 늘 읽는다
     status.update(checked=int(now), target=target, actual=actual, error=None, others=others)
     with _lock:
         state = _load()
@@ -202,8 +323,7 @@ def _tick():
         status["note"] = why
         if why:
             return
-    # 미체결 주문이 남아 있으면 새로 내지 않는다(조회는 잠금 밖에서)
-    pending = [o for o in ls.orders(symbol) if int(o.get("UnercQty") or 0) > 0]
+    # 미체결 주문이 남아 있으면 새로 내지 않는다(위에서 잠금 밖에서 읽은 것)
     if pending:
         status["note"] = f"미체결 주문 {len(pending)}건이 있어 기다립니다"
         return
@@ -211,7 +331,7 @@ def _tick():
     filler = target == actual
     qty = (-1 if actual > 0 else 1) if filler else target - actual
     entry = {"time": int(now), "day": ny.strftime("%Y-%m-%d"), "symbol": symbol, "qty": qty, "from": actual, "to": actual + qty,
-             "price": paper.status["price"], **({"filler": True} if filler else {})}
+             "price": paper.status["price"], **({"filler": True} if filler else {}), **({"flatten": True} if state.get("flatten") else {})}
     try:
         entry.update(ok=True, number=ls.market_order(symbol, qty))
         console.success(log, "LS 모의계좌 주문: %s %d계약 (%d → %d, %s) 주문번호 %s", "매수" if qty > 0 else "매도", abs(qty), actual, actual + qty,
@@ -250,7 +370,9 @@ def account():
     usd = next((r for r in ls.assets()[0] if r.get("CrcyCode") == "USD"), {})
     _, rows = ls.positions()
     deposit, pnl, margin = num(usd, "OvrsFutsDps"), num(usd, "AbrdFutsEvalPnlAmt"), num(usd, "AbrdFutsCsgnMgn")
-    equity = deposit + pnl
+    # 예탁금(OvrsFutsDps)은 장중에 청산손익·수수료가 반영되지 않는다(10-19 확인: 정리 뒤에도 100,000).
+    # 평가예탁총액 = 예탁금 + 청산손익(AbrdFutsLqdtPnlAmt) - 수수료(AbrdFutsCmsnAmt) + 평가손익
+    equity = num(usd, "AbrdFutsEvalDpstgTotAmt") or deposit + pnl
     held = sum(int(r["BalQty"]) for r in rows) or 1
     out = []
     for r in rows:
@@ -262,9 +384,47 @@ def account():
         out.append({"symbol": r["IsuCodeVal"], "name": r.get("IsuNm"), "qty": n, "entry": num(r, "PchsPrc"), "price": now, "pnl": p,
                     "roe": p / im if im else None, "of_capital": p / config.CAPITAL, "margin": im, "fee": num(r, "CsgnCmsn"),
                     "liq": liq if liq > 0 else None})
-    _account.update(at=time.time(), data={"equity": equity, "deposit": deposit, "pnl": pnl, "margin": margin, "capital": config.CAPITAL,
+    _account.update(at=time.time(), data={"equity": equity, "deposit": deposit, "cash": equity - pnl, "realized": num(usd, "AbrdFutsLqdtPnlAmt"),
+                                          "fees": num(usd, "AbrdFutsCmsnAmt"), "pnl": pnl, "margin": margin, "capital": config.CAPITAL,
                                           "ret": equity / config.CAPITAL - 1, "positions": out, "at": int(time.time())})
     return _account["data"]
+
+
+_history = {"at": 0, "data": None}
+
+
+def history():
+    """주문 기록 탭: 이 프로그램이 낸 주문(store/live.json)에 LS 주문내역의 체결가·체결 수량·상태를 붙이고,
+    LS에만 있는 주문(증권사 앱에서 낸 것)도 넣는다. 조회 한도 때문에 10초 동안은 같은 값을 준다.
+    shortcut: LS 주문내역은 오늘과 어제(한국 날짜)만 조회한다. 그 전 주문은 낸 때의 시세만 보인다. 대회 내내 체결가가 필요하면 날짜별로 받아 store에 쌓을 것."""
+    if _history["data"] and time.time() - _history["at"] < 10:
+        return _history["data"]
+    with _lock:
+        mine = json.loads(json.dumps(_load()["orders"]))
+    symbol = paper.status["symbol"]
+    rows = {}
+    if symbol:
+        for day in (datetime.now(KST) - timedelta(days=1), datetime.now(KST)):
+            for r in ls.orders(symbol, day.strftime("%Y%m%d")):
+                rows[int(r["OvrsFutsOrdNo"])] = r
+    num = lambda r, k: float(r.get(k) or 0)
+    out = []
+    for o in mine:
+        r = rows.pop(int(o["number"]), None) if o.get("number") else None
+        out.append({**o, "kind": "정리" if o.get("flatten") else "지정가" if o.get("limit") else "횟수 채우기" if o.get("filler") else "직접" if o.get("manual") else "자동",
+                    **({"exec_price": num(r, "AbrdFutsExecPrc"), "exec_qty": int(r.get("ExecQty") or 0), "unfilled": int(r.get("UnercQty") or 0),
+                        "canceled": int(r.get("CancQty") or 0), "state": r.get("TpCodeNm")} if r else {})})
+    for n, r in rows.items():  # 이 프로그램 밖에서 낸 주문
+        if r.get("TrdTpNm") != "신규":
+            continue
+        t = datetime.strptime(r["OrdDt"] + r["OrdTime"][:6], "%Y%m%d%H%M%S").replace(tzinfo=KST)
+        sign = 1 if r.get("BnsTpCode") == "2" else -1
+        out.append({"time": int(t.timestamp()), "symbol": r.get("IsuCodeVal"), "qty": sign * int(r.get("OrdQty") or 0), "number": str(n), "ok": True,
+                    "kind": "LS 앱", "price": num(r, "OvrsDrvtOrdPrc") or None, "exec_price": num(r, "AbrdFutsExecPrc"), "exec_qty": int(r.get("ExecQty") or 0),
+                    "unfilled": int(r.get("UnercQty") or 0), "canceled": int(r.get("CancQty") or 0), "state": r.get("TpCodeNm")})
+    out.sort(key=lambda o: o["time"])
+    _history.update(at=time.time(), data={"orders": out, "capital": config.CAPITAL, "multiplier": config.MULTIPLIER, "fee": 1.0})
+    return _history["data"]
 
 
 def get_live():
@@ -315,9 +475,12 @@ if __name__ == "__main__":
     assert sent == [2, -3] and "꺼져" in status["note"]
     paper._load = lambda: {config.LIVE["candidate"]: {"contracts": 1}}
     book["pos"] = -1
-    flatten()
+    market_open = lambda ny: False
+    flatten()                                     # 장이 쉬면 걸어 두기만 하고
+    assert sent == [2, -3] and _state["flatten"], sent
+    market_open = lambda ny: True
     tick()
-    assert sent == [2, -3, 1], sent              # 목표와 상관없이 숏 1 → 0: 매수 1
+    assert sent == [2, -3, 1], sent              # 열리면 목표와 상관없이 숏 1 → 0: 매수 1
     _state["orders"][-1]["time"] -= CONFIRM + 1
     book["pos"] = 0
     tick()
@@ -334,6 +497,56 @@ if __name__ == "__main__":
         except ValueError:
             pass
     assert sent == [2, -3, 1, -2]
+    manual(flip=True)                             # 뒤집기: 숏 2 → 롱 2, 매수 4 한 건
+    assert sent == [2, -3, 1, -2, 4] and _state["orders"][-1]["to"] == 2, sent
+    book["pos"] = 0
+    try:
+        manual(flip=True)
+        raise AssertionError("포지션 없이 뒤집음")
+    except ValueError:
+        pass
+    # 지정가 정리: 롱 2 → 매도 2 지정가, 자동 주문은 끔. 미체결이면 다시 못 내고, 취소하면 비운다
+    limits, cancels = [], []
+    ls.limit_order = lambda symbol, qty, price: limits.append((qty, price)) or "0000000002"
+    ls.cancel = lambda symbol, number: cancels.append(number) or "0000000003"
+    book["pos"], _state["enabled"] = 2, True
+    limit_close(30010.25)
+    assert limits == [(-2, 30010.25)] and not _state["enabled"] and _state["orders"][-1]["limit"], limits
+    book["pending"] = [{"UnercQty": "2", "OvrsFutsOrdNo": "0000000002", "BnsTpCode": "1", "OvrsDrvtOrdPrc": "30010.25", "AbrdFutsOrdPtnCode": "2"}]
+    tick()
+    assert status["pending"] == [{"number": "0000000002", "qty": -2, "price": 30010.25, "limit": True}], status["pending"]
+    for bad in (30010.1, 33000.0, "30000"):  # 틱 단위가 아님, 5% 넘게 떨어짐, 문자
+        try:
+            limit_close(bad)
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+    try:
+        limit_close(30000.0)
+        raise AssertionError("미체결 있는데 또 냄")
+    except ValueError:
+        pass
+    # 지정가 정정: 새 번호로 바뀌고 기록도 따라 바뀐다. 시장가 주문이나 없는 번호는 거절
+    mods = []
+    ls.modify = lambda symbol, number, qty, price: mods.append((number, qty, price)) or "0000000004"
+    assert modify_limit("0000000002", 30020.0) == {"number": "0000000004", "price": 30020.0}
+    assert mods == [("0000000002", -2, 30020.0)] and any(o.get("number") == "0000000004" and o["price"] == 30020.0 for o in _state["orders"]), mods
+    for number, price in (("0000000009", 30020.0), ("0000000002", 30020.1)):
+        try:
+            modify_limit(number, price)
+            raise AssertionError((number, price))
+        except ValueError:
+            pass
+    ls.orders = lambda symbol: [] if cancels else book["pending"]  # 취소하면 미체결이 사라진다
+    assert cancel_pending() == 1 and cancels == ["0000000002"] and status["pending"] == []
+    # 장중의 포지션 정리는 루프를 기다리지 않고 바로: 미체결 취소 → 시장가로 닫기, 자동 주문 끔
+    book["pos"], _state["enabled"], cancels[:] = 2, True, []
+    ls.orders = lambda symbol: [] if cancels else book["pending"]
+    flatten()
+    assert cancels == ["0000000002"] and sent[-1] == -2 and _state["orders"][-1]["flatten"] and not _state["enabled"] and not _state["flatten"], sent
+    ls.orders = lambda symbol: book["pending"]
+    book["pending"] = []
+    book["pos"] = -2
     # 주간 최소 거래: 목표와 같아도 모자라면 0 쪽으로 1계약, 다음 확인 때 목표로 되돌린다
     _state.update(enabled=True)
     _state["orders"][-1]["time"] -= CONFIRM + 1
