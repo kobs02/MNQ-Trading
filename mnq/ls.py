@@ -8,12 +8,14 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
 from . import config
 
 KST = timezone(timedelta(hours=9))
+NY = ZoneInfo("America/New_York")
 
 PATHS = {  # TR → 주소
     "o3101": "/overseas-futureoption/market-data",  # 해외선물 마스터
@@ -99,6 +101,12 @@ def today():
     return datetime.now().strftime("%Y%m%d")
 
 
+def order_day(now=None):
+    """LS 주문내역의 날짜(OrdDt): CME 거래일이라 뉴욕 18시에 다음 날로 넘어간다.
+    10-20 확인: 한국 01:28에 낸 주문이 OrdDt 20261019로 왔다(한국 날짜로 찾으면 자정 뒤 미체결이 안 보인다)."""
+    return (datetime.fromtimestamp(now or time.time(), NY) + timedelta(hours=6)).strftime("%Y%m%d")
+
+
 # ---------- 시세 ----------
 
 def front_month(product=config.PRODUCT):
@@ -171,9 +179,9 @@ def positions():
 
 
 def orders(symbol, day=None, unfilled=False):
-    """그날(한국 날짜 YYYYMMDD, 기본 오늘)의 주문내역. OrdDt·OrdTime도 한국 시각이다(10-19 확인).
+    """그 거래일(YYYYMMDD, 기본 지금 거래일 order_day)의 주문내역. OrdTime은 한국 시각, OrdDt는 거래일이다.
     unfilled면 미체결만(OrdStatCode 2, 10-19 확인: 0 전체·1 체결만 20건 넘음·2는 미체결 없을 때 0건) → 한 쪽이라 빠르다."""
-    body = {"CIDBQ01800InBlock1": {"RecCnt": 1, "IsuCodeVal": symbol, "OrdDt": day or today(), "ThdayTpCode": " ",
+    body = {"CIDBQ01800InBlock1": {"RecCnt": 1, "IsuCodeVal": symbol, "OrdDt": day or order_day(), "ThdayTpCode": " ",
                                    "OrdStatCode": "2" if unfilled else "0", "BnsTpCode": "0", "QryTpCode": "2", "OrdPtnCode": "00", "OvrsDrvtFnoTpCode": "A"}}
     # 한 번에 20건까지만 온다: 다음 쪽 열쇠로 끝까지 받는다(10-19: 21번째부터의 미체결 지정가를 못 봐 정리 주문이 두 번 나갔다)
     rows, key = [], None
@@ -199,7 +207,7 @@ def limit_order(symbol, qty, price):
 def cancel(symbol, number):
     """미체결 주문 취소(CIDBT01000). 취소 주문의 번호를 돌려준다."""
     data, _ = call("CIDBT01000", {"CIDBT01000InBlock1": {
-        "RecCnt": 1, "OrdDt": today(), "BrnNo": " ", "IsuCodeVal": symbol, "OvrsFutsOrgOrdNo": number,
+        "RecCnt": 1, "OrdDt": order_day(), "BrnNo": " ", "IsuCodeVal": symbol, "OvrsFutsOrgOrdNo": number,
         "FutsOrdTpCode": "3", "PrdtTpCode": " ", "ExchCode": " "}})  # 3 취소
     done = (data.get("CIDBT01000OutBlock2") or {}).get("OvrsFutsOrdNo")
     if not done or not done.strip("0"):
@@ -210,7 +218,7 @@ def cancel(symbol, number):
 def modify(symbol, number, qty, price):
     """미체결 지정가 주문의 가격 정정(CIDBT00900). qty는 원래 주문의 방향과 미체결 수량(매수 +, 매도 -). 정정된 주문의 새 번호를 돌려준다."""
     data, _ = call("CIDBT00900", {"CIDBT00900InBlock1": {
-        "RecCnt": 1, "OrdDt": today(), "RegBrnNo": " ", "OvrsFutsOrgOrdNo": number, "IsuCodeVal": symbol,
+        "RecCnt": 1, "OrdDt": order_day(), "RegBrnNo": " ", "OvrsFutsOrgOrdNo": number, "IsuCodeVal": symbol,
         "FutsOrdTpCode": "2", "BnsTpCode": "2" if qty > 0 else "1", "FutsOrdPtnCode": "2",  # 2 정정, 2 지정가
         "CrcyCodeVal": " ", "OvrsDrvtOrdPrc": price, "CndiOrdPrc": 0, "OrdQty": abs(int(qty)),
         "OvrsDrvtPrdtCode": "", "DueYymm": "", "ExchCode": " "}})

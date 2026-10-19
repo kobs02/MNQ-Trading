@@ -259,7 +259,8 @@ function renderDrawings() {
     if (!r) return '';
     const on = d === draw.selected;
     return `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="${color}" fill-opacity="${d.preview ? 0.03 : on ? 0.12 : 0.06}" stroke="${color}" stroke-width="${on ? 2 : 1}"${d.preview || on ? ' stroke-dasharray="4 3"' : ''}/>`
-      + (on ? boxCorners(d).map((c) => `<rect x="${c.x - 4}" y="${c.y - 4}" width="8" height="8" fill="${token('--panel')}" stroke="${color}" stroke-width="2"/>`).join('') : '');
+      + (on ? boxCorners(d).map((c) => (c.edge ? `<circle cx="${c.x}" cy="${c.y}" r="4"` : `<rect x="${c.x - 4}" y="${c.y - 4}" width="8" height="8"`)
+        + ` fill="${token('--panel')}" stroke="${color}" stroke-width="2"/>`).join('') : '');
   }).join('') + trends.map((d) => renderTrend(d, color)).join('') + renderMeasure() + renderOrderTags();
 }
 // 추세선: 두 점을 잇는 선. 고르면 굵은 점선과 양 끝 손잡이(boxCorners와 같은 꼴이라 같은 끌기로 옮긴다)
@@ -290,10 +291,16 @@ function renderMeasure() {
     + `<line x1="${x2}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"/>`
     + `<text x="${x + w / 2}" y="${ty}" text-anchor="middle" fill="${color}" font-size="13" font-weight="700" paint-order="stroke" stroke="${token('--bg')}" stroke-width="4">${label}</text>`;
 }
-// 박스의 네 모서리(고른 박스의 크기 조절 손잡이): 화면 좌표와, 그 모서리가 a·b 중 어느 시각·가격인지
+// 박스의 손잡이(고른 박스의 크기 조절): 네 모서리와 네 변 가운데. 화면 좌표와, 그 손잡이가 a·b 중 어느 시각(tk)·가격(pk)을 옮기는지.
+// 변 가운데는 한쪽만 옮긴다: 왼쪽·오른쪽 변은 시각만(가로로), 위·아래 변은 가격만(세로로)
 function boxCorners(d) {
   const x = { a: timeX(d.a.time), b: timeX(d.b.time) }, y = { a: series.priceToCoordinate(d.a.price), b: series.priceToCoordinate(d.b.price) };
-  return ['a', 'b'].flatMap((tk) => ['a', 'b'].map((pk) => ({ x: x[tk], y: y[pk], tk, pk }))).filter((c) => c.x != null && c.y != null);
+  const mid = (v) => (v.a == null || v.b == null ? null : (v.a + v.b) / 2);
+  return [
+    ...['a', 'b'].flatMap((tk) => ['a', 'b'].map((pk) => ({ x: x[tk], y: y[pk], tk, pk }))),
+    ...['a', 'b'].map((tk) => ({ x: x[tk], y: mid(y), tk, pk: null, edge: true })),
+    ...['a', 'b'].map((pk) => ({ x: mid(x), y: y[pk], tk: null, pk, edge: true })),
+  ].filter((c) => c.x != null && c.y != null);
 }
 
 // 차트에 그릴 과거 시험 매매. 스캘핑은 하루 50번쯤 드나들어 5분봉 이상에서는 봉을 덮으므로 마지막 세션(한국 08:00 ~)만 그린다
@@ -457,8 +464,14 @@ document.addEventListener('keydown', (e) => {
     const c = (d.type === 'trend' ? trendEnds(d).filter(Boolean) : boxCorners(d)).find((c) => Math.abs(c.x - (e.clientX - r.left)) <= 6 && Math.abs(c.y - (e.clientY - r.top)) <= 6);
     return c ? { d, ...c } : null;
   };
-  wrap.addEventListener('pointermove', (e) => { if (!dragging) wrap.style.cursor = corner(e) ? 'nwse-resize' : wrap.style.cursor === 'nwse-resize' ? '' : wrap.style.cursor; });
-  // 모서리를 끌면 크기 조절: 그 모서리의 시각과 가격만 옮긴다(맞은편 모서리는 그대로)
+  // 변 손잡이 커서는 col·row-resize: ns-resize는 지정가 선 끌기가 쓰고 지운다
+  const RESIZE = ['nwse-resize', 'col-resize', 'row-resize'];
+  wrap.addEventListener('pointermove', (e) => {
+    if (dragging) return;
+    const c = corner(e);
+    wrap.style.cursor = c ? (!c.pk ? 'col-resize' : !c.tk ? 'row-resize' : 'nwse-resize') : RESIZE.includes(wrap.style.cursor) ? '' : wrap.style.cursor;
+  });
+  // 손잡이를 끌면 크기 조절: 그 손잡이의 시각·가격만 옮긴다(맞은편은 그대로, 변 가운데는 한쪽만)
   wrap.addEventListener('pointerdown', (e) => {
     const c = e.button === 0 && !e.shiftKey && !e.ctrlKey && corner(e);
     if (!c) return;
@@ -470,8 +483,8 @@ document.addEventListener('keydown', (e) => {
       ev.stopPropagation();
       const p = at(ev);
       if (!p) return;
-      c.d[c.tk] = { ...c.d[c.tk], time: p.time };
-      c.d[c.pk] = { ...c.d[c.pk], price: p.price };
+      if (c.tk) c.d[c.tk] = { ...c.d[c.tk], time: p.time };
+      if (c.pk) c.d[c.pk] = { ...c.d[c.pk], price: p.price };
       renderDrawings();
     };
     wrap.addEventListener('pointermove', move, true);

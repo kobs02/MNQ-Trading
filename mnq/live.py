@@ -469,23 +469,44 @@ def account():
     return _account["data"]
 
 
-_history = {"at": 0, "data": None}
+_history = {"at": 0, "data": None, "busy": False}
+HISTORY = config.STORE / "ls_history.json"  # 마지막으로 만든 주문 기록: 서버를 켠 직후에도 기다리지 않고 바로 보여 준다
 
 
 def history():
-    """주문 기록 탭: 이 프로그램이 낸 주문(store/live.json)에 LS 주문내역의 체결가·체결 수량·상태를 붙이고,
-    LS에만 있는 주문(증권사 앱에서 낸 것)도 넣는다. 조회 한도 때문에 10초 동안은 같은 값을 준다.
-    LS 주문내역은 대회 첫날부터 날마다 받는다. 그저께까지의 날은 끝난 날이라 한 번 받으면 store/ls_orders/에 두고 다시 묻지 않는다."""
-    if _history["data"] and time.time() - _history["at"] < 10:
-        return _history["data"]
+    """주문 기록 탭: 만들어 둔 기록을 바로 주고, 10초가 지났으면 뒤에서 LS에 새로 물어 바꿔 둔다(화면이 15초마다 다시 읽는다).
+    처음 한 번(저장본도 없을 때)만 다 받을 때까지 기다린다."""
+    if not _history["data"]:
+        try:
+            _history["data"] = json.loads(HISTORY.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return _build_history()
+    if time.time() - _history["at"] >= 10 and not _history["busy"]:
+        _history["busy"] = True
+        threading.Thread(target=_refresh_history, daemon=True).start()
+    return _history["data"]
+
+
+def _refresh_history():
+    try:
+        _build_history()
+    except Exception:
+        log.exception("주문 기록을 새로 받지 못했습니다")
+    finally:
+        _history["busy"] = False
+
+
+def _build_history():
+    """이 프로그램이 낸 주문(store/live.json)에 LS 주문내역의 체결가·체결 수량·상태를 붙이고, LS에만 있는 주문(증권사 앱에서 낸 것)도 넣는다.
+    LS 주문내역은 대회 첫날부터 거래일마다 받는다. 지난 거래일은 끝난 날이라 한 번 받으면 store/ls_orders/에 두고 다시 묻지 않는다."""
     with _lock:
         mine = json.loads(json.dumps(_load()["orders"]))
     symbol = paper.status["symbol"]
     rows = {}
     if symbol:
-        day, today = datetime.fromtimestamp(config.LIVE["start"], KST).date(), datetime.now(KST).date()
-        while day <= today:
-            for r in _day_orders(symbol, day, done=day < today - timedelta(days=1)):
+        day, today = datetime.fromtimestamp(config.LIVE["start"], KST).date(), datetime.strptime(ls.order_day(), "%Y%m%d").date()
+        while day <= today:  # 지금 거래일만 LS에 다시 묻는다
+            for r in _day_orders(symbol, day, done=day < today):
                 rows[int(r["OvrsFutsOrdNo"])] = r
             day += timedelta(days=1)
     later = {int(r["OvrsFutsOrgOrdNo"]): r for r in rows.values() if r.get("TrdTpNm") == "정정"}  # 원래 번호 → 그것을 정정한 주문
@@ -509,6 +530,8 @@ def history():
         if int(last["OvrsFutsOrdNo"]) in seen:  # 이 프로그램이 정정한 지정가의 처음 번호(기록은 정정된 새 번호로 바뀌어 있다)
             continue
         t = datetime.strptime(r["OrdDt"] + r["OrdTime"][:6], "%Y%m%d%H%M%S").replace(tzinfo=KST)
+        if t.hour < 7:  # OrdDt는 CME 거래일(한국 07 ~ 08시에 시작): 그 앞 시각은 다음 날 새벽이다
+            t += timedelta(days=1)
         sign = 1 if r.get("BnsTpCode") == "2" else -1
         out.append({"time": int(t.timestamp()), "symbol": r.get("IsuCodeVal"), "qty": sign * int(r.get("OrdQty") or 0), "number": str(n), "ok": True,
                     "kind": "LS 앱", "price": num(r, "OvrsDrvtOrdPrc") or None, "exec_price": num(last, "AbrdFutsExecPrc"), "exec_qty": int(last.get("ExecQty") or 0),
@@ -516,11 +539,12 @@ def history():
     out.sort(key=lambda o: o["time"])
     _history.update(at=time.time(), data={"orders": out, "capital": config.CAPITAL, "multiplier": config.MULTIPLIER, "fee": 1.0,
                                           "start": config.LIVE["start"], "end": config.LIVE["end"]})
+    HISTORY.write_text(json.dumps(_history["data"], ensure_ascii=False), encoding="utf-8")
     return _history["data"]
 
 
 def _day_orders(symbol, day, done):
-    """그날(한국 날짜)의 LS 주문내역. done(끝난 날)이면 store/ls_orders/에 두고 다시 묻지 않는다."""
+    """그 거래일의 LS 주문내역. done(끝난 날)이면 store/ls_orders/에 두고 다시 묻지 않는다."""
     path = config.STORE / "ls_orders" / f"{symbol}_{day:%Y%m%d}.json"
     if done and path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
@@ -685,6 +709,9 @@ if __name__ == "__main__":
     assert sent[-1] == -1, sent                  # 다시 숏 2로
     # 주 세기(한국 시각 월 ~ 일)와 금요일 뉴욕 14 ~ 17시
     mon = datetime(2026, 10, 19, 8, tzinfo=KST).timestamp()
+    kst = lambda *d: datetime(*d, tzinfo=KST).timestamp()  # LS 주문 날짜는 CME 거래일: 한국 자정 넘어도 전날, 07시(겨울 08시)에 넘어간다
+    assert ls.order_day(kst(2026, 10, 20, 1, 28)) == "20261019" and ls.order_day(kst(2026, 10, 20, 7, 30)) == "20261020"
+    assert ls.order_day(kst(2026, 11, 10, 7, 30)) == "20261109" and ls.order_day(kst(2026, 11, 10, 8, 5)) == "20261110"
     assert week_fills([{"ok": True, "time": mon}, {"ok": True, "time": mon - 9 * 3600}, {"ok": False, "time": mon}], mon) == 1
     fri = datetime(2026, 10, 23, 14, 30, tzinfo=NY)
     import mnq.live as original  # 위에서 바꿔 끼운 것 말고 원래 함수로 확인
