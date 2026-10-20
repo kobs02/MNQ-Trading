@@ -1307,9 +1307,30 @@ function closeEstimate(p, at) {  // at: 지정가로 닫을 가격(없으면 지
   };
 }
 
+// 실제 포지션이 바뀌면(진입·청산·계약 수 변화) 은행 동전 소리 '촤랑'. 처음 읽은 값은 지난 것이라 울리지 않는다
+let posSeen = null;
+function chaChing() {
+  if (!audio) return;
+  const t = audio.currentTime, n = audio.sampleRate * 0.08, buf = audio.createBuffer(1, n, audio.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);  // '촤': 짧은 잡음
+  const src = audio.createBufferSource(), hp = audio.createBiquadFilter(), g = audio.createGain();
+  hp.type = 'highpass'; hp.frequency.value = 4000; g.gain.value = 0.15;
+  src.buffer = buf; src.connect(hp).connect(g).connect(audio.destination); src.start(t);
+  [2093, 2637, 3136, 4186, 3520].forEach((f, i) => {  // '랑': 동전이 부딪히는 높은 금속음 여럿
+    const o = audio.createOscillator(), e = audio.createGain(), at = t + 0.06 + i * 0.045;
+    o.frequency.value = f;
+    e.gain.setValueAtTime(0.12, at);
+    e.gain.exponentialRampToValueAtTime(0.001, at + 0.6);
+    o.connect(e).connect(audio.destination);
+    o.start(at); o.stop(at + 0.6);
+  });
+}
 async function tickAccount() {
   try {
     account = await api('/api/account');
+    const sig = account.positions.map((p) => `${p.symbol}:${p.qty}`).join();
+    if (posSeen !== null && sig !== posSeen) chaChing();
+    posSeen = sig;
     renderAccount();
   } catch (e) {
     $('account-note').textContent = '조회하지 못했습니다: ' + e.message;
