@@ -24,6 +24,7 @@ PATHS = {  # TR → 주소
     "o3108": "/overseas-futureoption/chart",        # 일·주·월봉
     "CIDBQ01500": "/overseas-futureoption/accno",   # 미결제잔고
     "CIDBQ01800": "/overseas-futureoption/accno",   # 주문내역
+    "CIDBQ02400": "/overseas-futureoption/accno",   # 주문체결내역 상세(체결 시각)
     "CIDBQ05300": "/overseas-futureoption/accno",   # 예탁자산
     "CIDBT00100": "/overseas-futureoption/order",   # 신규주문
     "CIDBT00900": "/overseas-futureoption/order",   # 정정주문
@@ -188,6 +189,19 @@ def orders(symbol, day=None, unfilled=False):
     while True:
         data, key = call("CIDBQ01800", body, key)
         rows += data.get("CIDBQ01800OutBlock2") or []
+        if not key:
+            return rows
+
+
+def fills(symbol, day=None):
+    """그 거래일의 체결 한 건씩(CIDBQ02400). 주문내역(CIDBQ01800)에는 없는 체결 시각 ExecDttm(한국 시각 YYYYMMDDHHMMSSmmm)이 있다(10-20 확인)."""
+    day = day or order_day()
+    body = {"CIDBQ02400InBlock1": {"RecCnt": 1, "IsuCodeVal": symbol, "QrySrtDt": day, "QryEndDt": day, "ThdayTpCode": " ",
+                                   "OrdStatCode": "1", "BnsTpCode": "0", "QryTpCode": "2", "OrdPtnCode": "00", "OvrsDrvtFnoTpCode": "A"}}
+    rows, key = [], None
+    while True:
+        data, key = call("CIDBQ02400", body, key)
+        rows += data.get("CIDBQ02400OutBlock2") or []
         if not key:
             return rows
 

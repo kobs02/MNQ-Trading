@@ -33,9 +33,12 @@
       <div id="summary" class="stats order-stats"></div>
     </section>
     <section class="card">
-      <h2>매매 차트 <small id="trade-chart-note">첫 체결부터 마지막 체결까지 · ▲ 매수 · ▼ 매도 · 한국 시각</small></h2>
-      <div id="trade-chart" class="trade-chart"></div>
-      <p class="why-foot">화살표 옆 글자: 롱·숏을 열거나 늘린 체결은 "롱 8"처럼 그 뒤 포지션, 닫은 체결은 닫은 몫의 실현 손익(수수료 전). 체결가는 LS 주문내역 기준이고, 봉 단위는 기간에 맞춰 1 · 5 · 15 · 60분봉 중에서 고릅니다.</p>
+      <div class="paper-head">
+        <h2>매매 차트 <small id="trade-chart-note">첫 체결부터 마지막 체결까지 · ▲ 매수 · ▼ 매도 · 한국 시각</small></h2>
+        <div class="head-tools"><button id="refresh" type="button" class="plain-button">새로고침</button></div>
+      </div>
+      <div class="trade-chart-wrap"><div id="trade-chart" class="trade-chart"></div><svg id="trade-labels" class="draw-layer" aria-hidden="true"></svg></div>
+      <p class="why-foot">화살표 옆 글자: 롱·숏을 열거나 늘린 체결은 "롱 8"처럼 그 뒤 포지션, 닫은 체결은 닫은 몫의 실현 손익(수수료 전). 체결가는 LS 주문내역 기준이고, 봉은 1분봉입니다.</p>
     </section>
     <section class="card">
       <h2>대회 달력 <small>하루 실현 손익(대회 기준: 증권사 수수료와 대회 차감을 뺌) · 한국 날짜</small></h2>
@@ -48,7 +51,7 @@
     <section class="card">
       <h2>체결</h2>
       <div class="table-scroll"><table class="trend-table order-table">
-        <thead><tr><th>시각 (한국)</th><th>구분</th><th>주문</th><th>포지션</th><th title="주문을 낸 순간의 시세(지정가는 주문 가격)">주문 때 가격</th><th>체결가</th>
+        <thead><tr><th title="체결된 주문은 체결 시각(마우스를 올리면 주문 낸 시각), 체결 안 된 주문은 낸 시각">시각 (한국)</th><th>구분</th><th>주문</th><th>포지션</th><th title="주문을 낸 순간의 시세(지정가는 주문 가격)">주문 때 가격</th><th>체결가</th>
           <th title="체결가가 주문 때 가격보다 불리한 만큼(틱, 1틱 = 0.25 = $0.5)">미끄러짐</th><th title="이 체결이 닫은 몫의 손익(평균 진입가 기준, 수수료 전)">실현 손익</th>
           <th title="체결 1계약당 증권사 $1 + 대회 차감 $1">수수료</th><th>상태</th><th>주문번호</th></tr></thead>
         <tbody id="rows"><tr><td colspan="11" class="empty">불러오는 중…</td></tr></tbody>

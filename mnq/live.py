@@ -574,7 +574,7 @@ def _build_history():
             seen.add(int(o["number"]))
         while r is not None and int(r.get("MdfyQty") or 0) and int(r["OvrsFutsOrdNo"]) in later:  # 정정됐으면 마지막 정정 주문의 체결을 본다
             r = later[int(r["OvrsFutsOrdNo"])]
-        out.append({**o, "kind": "정리" if o.get("flatten") else "지정가" if o.get("limit") else "횟수 채우기" if o.get("filler") else "직접" if o.get("manual") else "자동",
+        out.append({**o, **_exec_time(r, o["time"]), "kind": "정리" if o.get("flatten") else "지정가" if o.get("limit") else "횟수 채우기" if o.get("filler") else "직접" if o.get("manual") else "자동",
                     **({"exec_price": num(r, "AbrdFutsExecPrc"), "exec_qty": int(r.get("ExecQty") or 0), "unfilled": int(r.get("UnercQty") or 0),
                         "canceled": int(r.get("CancQty") or 0), "state": r.get("TpCodeNm")} if r else {})})
     for n, r in rows.items():  # 이 프로그램 밖에서 낸 주문
@@ -589,7 +589,7 @@ def _build_history():
         if t.hour < 7:  # OrdDt는 CME 거래일(한국 07 ~ 08시에 시작): 그 앞 시각은 다음 날 새벽이다
             t += timedelta(days=1)
         sign = 1 if r.get("BnsTpCode") == "2" else -1
-        out.append({"time": int(t.timestamp()), "symbol": r.get("IsuCodeVal"), "qty": sign * int(r.get("OrdQty") or 0), "number": str(n), "ok": True,
+        out.append({"time": int(t.timestamp()), **_exec_time(last, int(t.timestamp())), "symbol": r.get("IsuCodeVal"), "qty": sign * int(r.get("OrdQty") or 0), "number": str(n), "ok": True,
                     "kind": "LS 앱", "price": num(r, "OvrsDrvtOrdPrc") or None, "exec_price": num(last, "AbrdFutsExecPrc"), "exec_qty": int(last.get("ExecQty") or 0),
                     "unfilled": int(last.get("UnercQty") or 0), "canceled": int(last.get("CancQty") or 0), "state": last.get("TpCodeNm")})
     out.sort(key=lambda o: o["time"])
@@ -599,12 +599,29 @@ def _build_history():
     return _history["data"]
 
 
+def _exec_time(r, ordered):
+    """체결됐으면 time을 체결 시각으로(차트·달력·평균가 계산이 체결 순서를 따르게), 낸 시각은 order_time에. 지정가는 낸 뒤 한참 뒤에 체결된다."""
+    if not r or not r.get("ExecDttm"):
+        return {}
+    t = datetime.strptime(r["ExecDttm"][:14], "%Y%m%d%H%M%S").replace(tzinfo=KST)
+    return {"time": int(t.timestamp()), "order_time": ordered}
+
+
 def _day_orders(symbol, day, done):
     """그 거래일의 LS 주문내역. done(끝난 날)이면 store/ls_orders/에 두고 다시 묻지 않는다."""
     path = config.STORE / "ls_orders" / f"{symbol}_{day:%Y%m%d}.json"
     if done and path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
+        rows = json.loads(path.read_text(encoding="utf-8"))
+        if not any(r.get("ExecQty") for r in rows) or any("ExecDttm" in r for r in rows):  # 10-20 전 저장본에는 체결 시각이 없어 한 번 다시 받는다
+            return rows
     rows = ls.orders(symbol, f"{day:%Y%m%d}")
+    last = {}  # 주문번호 → 마지막 체결 시각(나눠 체결되면 마지막 것)
+    for f in ls.fills(symbol, f"{day:%Y%m%d}"):
+        n = int(f["OvrsFutsOrdNo"])
+        last[n] = max(last.get(n, ""), f.get("ExecDttm") or "")
+    for r in rows:
+        if last.get(int(r["OvrsFutsOrdNo"])):
+            r["ExecDttm"] = last[int(r["OvrsFutsOrdNo"])]
     if done:
         path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")

@@ -39,7 +39,7 @@ function renderRows() {
   $('rows').innerHTML = table.length ? table.slice(page * PAGE, page * PAGE + PAGE).map((r) => {
     const slip = r.exec_price && r.price && !r.limit ? Math.sign(r.qty) * (r.exec_price - r.price) / 0.25 : null;  // + = 불리
     const state = !r.ok ? `<span class="c-down">실패</span> ${r.error || ''}` : r.unfilled ? `미체결 ${r.unfilled}` : r.canceled ? `취소 ${r.canceled}` : r.state ? '체결' : '체결(추정)';
-    return `<tr><td>${fmtTime(r.time)}</td><td>${r.kind}</td><td><b class="${tone(r.qty)}">${r.qty > 0 ? '매수' : '매도'} ${Math.abs(r.qty)}</b></td>`
+    return `<tr><td${r.order_time ? ` title="주문 낸 시각 ${fmtTime(r.order_time)}"` : ''}>${fmtTime(r.time)}</td><td>${r.kind}</td><td><b class="${tone(r.qty)}">${r.qty > 0 ? '매수' : '매도'} ${Math.abs(r.qty)}</b></td>`
       + `<td>${r.from != null ? `${side(r.from)} → ${side(r.to)}` : `→ ${side(r.pos)}`}</td><td>${fmtPrice(r.price)}</td><td>${r.exec_price ? fmtPrice(r.exec_price) : '-'}</td>`
       + `<td class="${slip > 0 ? 'c-down' : slip < 0 ? 'c-up' : ''}">${slip == null ? '-' : `${slip > 0 ? '+' : ''}${slip.toFixed(1)}틱`}</td>`
       + `<td>${r.realized == null ? '-' : `<b class="${tone(r.realized)}">${fmtMoney(r.realized)}</b>`}</td><td>${r.filled ? fmtMoney(r.fee) : '-'}</td><td>${state}</td><td>${r.number || '-'}</td></tr>`;
@@ -73,8 +73,8 @@ function render(d) {
   table = rows.slice().reverse();
   renderRows();
   renderCalendar(rows, d);
-  renderChart(rows);
   $('updated').textContent = `${new Date().toLocaleTimeString('ko-KR')} 조회`;
+  return renderChart(rows);
 }
 
 // 대회 달력: 한국 날짜마다 닫은 몫의 손익 - 그날 체결의 수수료(대회 기준). 대회 첫 주 월요일부터 마지막 날이 든 주까지, 주마다 한 줄
@@ -107,10 +107,10 @@ function renderCalendar(rows, d) {
   $('cal').innerHTML = weeks.join('');
 }
 
-// 매매 차트: 첫 체결 ~ 마지막 체결 구간의 봉에 체결을 화살표로. 봉 단위는 그 구간이 받아 오는 봉(1,000개) 안에 들어가는 가장 짧은 것
+// 매매 차트: 첫 체결 ~ 마지막 체결 구간의 1분봉에 체결을 화살표로
 const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const TZ = -new Date().getTimezoneOffset() * 60;  // lightweight-charts는 UTC로 그리므로 브라우저 시각으로 옮긴다(실시간 차트와 같게)
-let tradeChart = null, tradeSeries = null, shown = [];
+let tradeChart = null, tradeSeries = null, shown = [], labels = [], barAt = new Map();
 function chartTheme() {
   tradeChart.applyOptions({
     layout: { textColor: token('--text-2') }, grid: { vertLines: { color: token('--grid') }, horzLines: { color: token('--grid') } },
@@ -126,7 +126,7 @@ async function renderChart(rows) {
     return;
   }
   const first = fills[0].time, last = fills[fills.length - 1].time;
-  const minutes = [1, 5, 15, 60].find((m) => (Date.now() / 1000 - first) / (m * 60) < 900) || 60;
+  const minutes = 1;  // 1분봉만(사용자 요청, 10-20). 서버가 첫 체결까지의 1분봉을 주지 못하면 그 앞 체결은 화살표가 빠진다
   const step = minutes * 60, pad = 6 * step;
   let bars;
   try {
@@ -143,31 +143,80 @@ async function renderChart(rows) {
       timeScale: { timeVisible: true, secondsVisible: false }, crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, localization: { locale: 'ko-KR' },
     });
     tradeSeries = tradeChart.addCandlestickSeries({ borderVisible: false, priceFormat: { type: 'custom', minMove: 0.25, formatter: fmtPrice } });
+    tradeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.18, bottom: 0.18 } });  // 위아래로 띄운 글자가 들어갈 자리
     chartTheme();
+    // 끌기·확대 때 글자 자리를 다시 잡는다. 가격 축은 범위가 바뀐 뒤 다음 그리기에서 다시 맞춰지므로 두 프레임 뒤에 잰다
+    const later = () => requestAnimationFrame(() => requestAnimationFrame(renderLabels));
+    tradeChart.timeScale().subscribeVisibleLogicalRangeChange(later);
+    new ResizeObserver(later).observe($('trade-chart'));
     document.addEventListener('themechange', () => { chartTheme(); renderChart(shown); });  // 화살표 색도 새 테마로
   }
   const fresh = !tradeSeries.data().length;
-  tradeSeries.setData(bars.map((b) => ({ ...b, time: b.time + TZ })));
-  tradeSeries.setMarkers(fills.map((r) => {
+  const data = bars.map((b) => ({ ...b, time: b.time + TZ }));
+  tradeSeries.setData(data);
+  barAt = new Map(data.map((b) => [b.time, b]));
+  labels = fills.map((r) => {
     const buy = r.filled > 0;
     return {
-      time: Math.floor(r.time / step) * step + TZ, position: buy ? 'belowBar' : 'aboveBar', shape: buy ? 'arrowUp' : 'arrowDown',
-      color: token(r.realized != null ? (r.realized >= 0 ? '--long' : '--short') : buy ? '--long' : '--short'),
+      time: Math.floor(r.time / step) * step + TZ, buy,
+      color: token(r.realized != null ? (r.realized >= 0 ? '--accent' : '--loss') : buy ? '--long' : '--short'),
       text: r.realized != null ? `정리 ${r.realized >= 0 ? '+' : ''}${fmtMoney(r.realized)}` : side(r.pos),
     };
-  }));
+  });
+  // 화살표만 차트에 두고 글자는 아래 renderLabels가 그린다(차트 글자는 크기를 못 바꾸고 서로 겹친다)
+  tradeSeries.setMarkers(labels.map((l) => ({ time: l.time, position: l.buy ? 'belowBar' : 'aboveBar', shape: l.buy ? 'arrowUp' : 'arrowDown', color: l.color })));
   if (fresh) tradeChart.timeScale().fitContent();
+  requestAnimationFrame(() => requestAnimationFrame(renderLabels));  // 새 봉으로 가격 축이 다시 맞춰진 뒤에
   $('trade-chart-note').textContent = `${fmtTime(first)} ~ ${fmtTime(last)} · ${minutes}분봉 · ▲ 매수 · ▼ 매도 · 한국 시각`;
+}
+
+// 체결 글자: 봉 끝에서 떨어뜨려(매수는 아래, 매도는 위) 그리고, 이미 놓인 글자 칸과 겹치면 한 층씩 더 띄운다. 띄운 글자는 화살표까지 가는 가는 선으로 잇는다
+const LABEL_GAP = 30, LABEL_STEP = 23, LABEL_H = 20, LABEL_PAD = 3;
+const measure = document.createElement('canvas').getContext('2d');
+function renderLabels() {
+  const svg = $('trade-labels');
+  if (!tradeChart || !labels.length) { svg.innerHTML = ''; return; }
+  const ts = tradeChart.timeScale(), width = ts.width(), placed = [];
+  measure.font = `700 13px ${getComputedStyle(document.body).fontFamily}`;
+  const hits = (r) => placed.some((p) => r.x1 < p.x2 + LABEL_PAD && r.x2 > p.x1 - LABEL_PAD && r.y1 < p.y2 + LABEL_PAD && r.y2 > p.y1 - LABEL_PAD);
+  const out = labels.map((l) => {
+    const x = ts.timeToCoordinate(l.time), b = barAt.get(l.time);
+    if (x == null || !b || x < 0 || x > width) return '';
+    const edge = tradeSeries.priceToCoordinate(l.buy ? b.low : b.high);
+    if (edge == null) return '';
+    const w = Math.ceil(measure.measureText(l.text).width) + 14;
+    const lx = Math.min(Math.max(x, w / 2 + 2), width - w / 2 - 2);  // 차트 양 끝에서 잘리지 않게 안으로
+    const dir = l.buy ? 1 : -1;
+    let cy, r;
+    for (let k = 0; k < 12; k++) {
+      cy = edge + dir * (LABEL_GAP + k * LABEL_STEP);
+      r = { x1: lx - w / 2, x2: lx + w / 2, y1: cy - LABEL_H / 2, y2: cy + LABEL_H / 2 };
+      if (!hits(r)) break;
+    }
+    placed.push(r);
+    const tip = edge + dir * 16;  // 화살표 끝 근처
+    return `<line x1="${x}" y1="${tip}" x2="${x}" y2="${cy - dir * LABEL_H / 2}" stroke="${l.color}" stroke-opacity=".5"/>`
+      + `<rect x="${r.x1}" y="${r.y1}" width="${w}" height="${LABEL_H}" rx="4" fill="${token('--panel')}" stroke="${l.color}"/>`
+      + `<text x="${lx}" y="${cy + 4.5}" text-anchor="middle" fill="${l.color}" font-size="13" font-weight="700">${l.text}</text>`;
+  });
+  // 선을 먼저, 글자 칸을 나중에 그려 다른 글자의 연결선이 칸을 가로지르지 않게
+  const lines = out.map((o) => o.slice(0, o.indexOf('/>') + 2)).join(''), boxes = out.map((o) => o.slice(o.indexOf('/>') + 2)).join('');
+  svg.innerHTML = `<svg x="0" y="0" width="${width}" overflow="hidden">${lines}${boxes}</svg>`;
 }
 
 async function tick() {
   try {
     const r = await fetch('/api/live/history');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    render(await r.json());
+    await render(await r.json());
   } catch (e) {
     $('updated').textContent = '불러오지 못했습니다: ' + e.message;
   }
 }
+$('refresh').addEventListener('click', async () => {
+  $('refresh').disabled = true;
+  await tick();
+  $('refresh').disabled = false;
+});
 tick();
 setInterval(tick, 15000);

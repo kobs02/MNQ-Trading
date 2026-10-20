@@ -245,9 +245,9 @@ function renderDrawings() {
   const want = new Set(draw.items.filter((d) => d.type === 'hline'));
   hlines.forEach((line, d) => { if (!want.has(d)) { series.removePriceLine(line); hlines.delete(d); } });
   want.forEach((d) => {
-    if (!hlines.has(d)) hlines.set(d, series.createPriceLine({ price: d.price, color: token('--accent'), lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: '' }));
+    if (!hlines.has(d)) hlines.set(d, series.createPriceLine({ price: d.price, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: '' }));
     const on = d === draw.selected;  // 고른 선은 굵은 점선
-    hlines.get(d).applyOptions({ lineWidth: on ? 2 : 1, lineStyle: on ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid });
+    hlines.get(d).applyOptions({ color: d.color || token('--draw'), lineWidth: on ? 2 : 1, lineStyle: on ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid });
   });
   // 박스: 그리기 층(SVG)에. 그리는 중이면 커서까지 미리 보여 준다
   const boxes = draw.items.filter((d) => d.type === 'box');
@@ -261,7 +261,7 @@ function renderDrawings() {
     return `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="${color}" fill-opacity="${d.preview ? 0.03 : on ? 0.12 : 0.06}" stroke="${color}" stroke-width="${on ? 2 : 1}"${d.preview || on ? ' stroke-dasharray="4 3"' : ''}/>`
       + (on ? boxCorners(d).map((c) => (c.edge ? `<circle cx="${c.x}" cy="${c.y}" r="4"` : `<rect x="${c.x - 4}" y="${c.y - 4}" width="8" height="8"`)
         + ` fill="${token('--panel')}" stroke="${color}" stroke-width="2"/>`).join('') : '');
-  }).join('') + trends.map((d) => renderTrend(d, color)).join('') + renderMeasure() + renderOrderTags();
+  }).join('') + trends.map((d) => renderTrend(d, token('--draw'))).join('') + renderMeasure() + renderOrderTags();
 }
 // 추세선: 두 점을 잇는 선. 고르면 굵은 점선과 양 끝 손잡이(boxCorners와 같은 꼴이라 같은 끌기로 옮긴다)
 function renderTrend(d, color) {
@@ -360,8 +360,17 @@ function hitTest(pt) {
 }
 function select(d) {
   draw.selected = d;
+  // 수평선을 고르면 도구 막대에 색 고르기가 나온다
+  $('hline-color').hidden = !(d && d.type === 'hline');
+  if (d && d.type === 'hline') $('hline-color').value = d.color || token('--draw');
   renderDrawings();
 }
+$('hline-color').addEventListener('input', (e) => {
+  if (!draw.selected || draw.selected.type !== 'hline') return;
+  draw.selected.color = e.target.value;
+  keep('mnqDraw', draw.items);
+  renderDrawings();
+});
 function removeSelected() {
   draw.items = draw.items.filter((d) => d !== draw.selected);
   keep('mnqDraw', draw.items);
@@ -529,7 +538,7 @@ document.addEventListener('keydown', (e) => {
   // 차트 라이브러리는 마우스 이벤트로도 끌기를 하므로 Ctrl·Shift를 누른 동안은 그것도 막는다
   ['mousedown', 'mousemove', 'mouseup'].forEach((t) => wrap.addEventListener(t, (e) => { if (e.shiftKey || e.ctrlKey || dragging) e.stopPropagation(); }, true));
 })();
-// 미체결 지정가 주문: 차트에 점선으로. 선을 마우스로 끌어 놓으면 그 가격으로 정정한다(LS 정정 주문, 주문번호가 바뀐다)
+// 미체결 지정가 주문: 차트에 점선으로. 왼쪽 이름표를 끌어 놓으면 그 가격으로 정정한다(LS 정정 주문, 주문번호가 바뀐다)
 const orderLines = new Map();  // 주문번호 → { line, order }
 let orderDrag = null;          // 끄는 중인 { number, order, price }
 // 이 지정가가 그 가격에 체결되면 지금 포지션의 닫는 몫이 수수료 빼고 얼마인가(진입·청산 각각 대회 $1 + 증권사 $1, 계약당). 닫는 주문이 아니면 ''
@@ -560,6 +569,7 @@ function renderOrderTags() {
     const y = series.priceToCoordinate(v.price);
     if (y == null) return '';
     const w = [...v.tag].reduce((s, ch) => s + (ch.charCodeAt(0) > 0x2e00 ? 12 : 6.6), 16);  // 한글은 넓게 어림
+    v.box = { x: 8, y: y - 11, w, h: 22 };            // 이름표(X 왼쪽): 여기를 끌어야만 정정(선 근처를 끌면 차트가 움직인다)
     v.close = { x: 8 + w, y: y - 11, w: 22, h: 22 };  // 오른쪽 끝 X: 누르면 이 주문만 취소(누르는 자리는 아래 pointerdown이 본다)
     const color = v.order.qty > 0 ? ORDER_BUY : ORDER_SELL;
     return `<rect x="8" y="${y - 11}" width="${w + 22}" height="22" rx="3" fill="${color}" stroke="#fff" stroke-width="1.5"/>`
@@ -571,17 +581,17 @@ function renderOrderTags() {
 (function () {
   const wrap = $('chart-wrap');
   const yOf = (e) => e.clientY - $('chart').getBoundingClientRect().top;
-  const near = (e) => {  // 마우스가 위아래 6px 안에 있는 주문 선(우클릭 메뉴 위는 빼서 정리 비율 막대를 끌 수 있게)
+  const inside = (e, b) => {
+    const r = $('chart').getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    return b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+  };
+  const near = (e) => {  // 마우스 밑의 주문 이름표(우클릭 메뉴 위는 빼서 정리 비율 막대를 끌 수 있게)
     if (e.target.closest && e.target.closest('#ctx-menu')) return null;
-    for (const [n, v] of orderLines) {
-      const y = series.priceToCoordinate(v.order.price);
-      if (y != null && Math.abs(y - yOf(e)) <= 6) return { number: n, order: v.order };
-    }
+    for (const [n, v] of orderLines) if (inside(e, v.box)) return { number: n, order: v.order };
     return null;
   };
   const closeAt = (e) => {  // 마우스 밑의 이름표 X(그 주문번호)
-    const r = $('chart').getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
-    for (const [n, v] of orderLines) if (v.close && x >= v.close.x && x <= v.close.x + v.close.w && y >= v.close.y && y <= v.close.y + v.close.h) return n;
+    for (const [n, v] of orderLines) if (inside(e, v.close)) return n;
     return null;
   };
   wrap.addEventListener('pointerdown', async (e) => {
