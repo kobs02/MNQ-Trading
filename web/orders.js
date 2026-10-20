@@ -126,13 +126,18 @@ async function renderChart(rows) {
     return;
   }
   const first = fills[0].time, last = fills[fills.length - 1].time;
-  const minutes = 1;  // 1분봉만(사용자 요청, 10-20). 서버가 첫 체결까지의 1분봉을 주지 못하면 그 앞 체결은 화살표가 빠진다
+  const minutes = 1;  // 1분봉만(사용자 요청, 10-20)
   const step = minutes * 60, pad = 6 * step;
   let bars;
   try {
-    const r = await fetch(`/api/chart?interval=${minutes}`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    bars = (await r.json()).bars.filter((b) => b.time >= first - pad && b.time <= last + pad);
+    const load = async (path) => { const r = await fetch(path); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); };
+    bars = (await load(`/api/chart?interval=${minutes}`)).bars;
+    // 서버는 켠 뒤 최근 1분봉 1,000개쯤만 들고 있다: 첫 체결까지 모자라면 이전 봉을 1,000개씩 더 받게 한다(서버에 쌓여 다음부터는 바로 온다)
+    for (let k = 0; k < 60 && bars.length && bars[0].time > first - pad; k++) {
+      if ((await load(`/api/chart/older?interval=${minutes}`)).done) break;
+      bars = (await load(`/api/chart?interval=${minutes}`)).bars;
+    }
+    bars = bars.filter((b) => b.time >= first - pad && b.time <= last + pad);
   } catch (e) {
     $('trade-chart-note').textContent = '차트를 불러오지 못했습니다: ' + e.message;
     return;
