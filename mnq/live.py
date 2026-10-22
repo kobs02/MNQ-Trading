@@ -348,9 +348,14 @@ def modify_limit(number, price):
     symbol = _check_price(price)
     with _busy:
         row = next((o for o in _open_rows(symbol) if o.get("OvrsFutsOrdNo") == number), None)
-        if not row or row.get("AbrdFutsOrdPtnCode") != "2":
+        held = _hold.get(number)
+        if row and row.get("AbrdFutsOrdPtnCode") == "2":
+            qty = (1 if row.get("BnsTpCode") == "2" else -1) * int(row["UnercQty"])
+        elif not row and held and time.time() < held[0] and held[1] and held[1].get("limit"):
+            # 방금 낸·정정한 지정가는 LS 주문내역에 몇 초 늦게 잡힌다: 그사이 다시 끌면 아는 수량으로 보낸다(이미 체결됐으면 LS가 거절한다)
+            qty, row = held[1]["qty"], {"OvrsDrvtOrdPrc": held[1]["price"]}
+        else:
             raise ValueError("정정할 미체결 지정가 주문이 없습니다(이미 체결됐거나 취소됐을 수 있습니다)")
-        qty = (1 if row.get("BnsTpCode") == "2" else -1) * int(row["UnercQty"])
         new = ls.modify(symbol, number, qty, price)
         console.success(log, "LS 모의계좌 지정가 정정: %s %d계약 %s → %.2f (주문번호 %s → %s)", "매수" if qty > 0 else "매도", abs(qty),
                         row.get("OvrsDrvtOrdPrc"), price, number, new)
@@ -566,32 +571,40 @@ def _build_history():
                 rows[int(r["OvrsFutsOrdNo"])] = r
             day += timedelta(days=1)
     later = {int(r["OvrsFutsOrgOrdNo"]): r for r in rows.values() if r.get("TrdTpNm") == "정정"}  # 원래 번호 → 그것을 정정한 주문
+    earlier = {int(r["OvrsFutsOrdNo"]): int(r["OvrsFutsOrgOrdNo"]) for r in rows.values() if r.get("TrdTpNm") == "정정"}
     num = lambda r, k: float(r.get(k) or 0)
+
+    def chain(n):
+        """정정으로 이어진 주문들(처음 ~ 마지막). 기록의 번호는 처음 것일 수도 마지막 것일 수도 있다."""
+        while n in earlier and earlier[n] in rows:
+            n = earlier[n]
+        rs = [rows[n]] if n in rows else []
+        while rs and int(rs[-1].get("MdfyQty") or 0) and int(rs[-1]["OvrsFutsOrdNo"]) in later:
+            rs.append(later[int(rs[-1]["OvrsFutsOrdNo"])])
+        return rs
+
+    def filled(rs, ordered):
+        """정정 전에 일부 체결된 몫은 앞 번호에 남으므로 체결 수량은 모두 더하고 체결가는 수량 가중 평균(10-22: 14계약 중 5계약이 빠졌었다)."""
+        q = sum(int(r.get("ExecQty") or 0) for r in rs)
+        last, done = rs[-1], max(rs, key=lambda r: r.get("ExecDttm") or "")
+        return {**_exec_time(done, ordered), "exec_price": sum(num(r, "AbrdFutsExecPrc") * int(r.get("ExecQty") or 0) for r in rs) / q if q else 0.0, "exec_qty": q,
+                "unfilled": int(last.get("UnercQty") or 0), "canceled": int(last.get("CancQty") or 0), "state": last.get("TpCodeNm")}
+
     out, seen = [], set()
     for o in mine:
-        r = rows.pop(int(o["number"]), None) if o.get("number") else None
-        if o.get("number"):
-            seen.add(int(o["number"]))
-        while r is not None and int(r.get("MdfyQty") or 0) and int(r["OvrsFutsOrdNo"]) in later:  # 정정됐으면 마지막 정정 주문의 체결을 본다
-            r = later[int(r["OvrsFutsOrdNo"])]
-        out.append({**o, **_exec_time(r, o["time"]), "kind": "정리" if o.get("flatten") else "지정가" if o.get("limit") else "횟수 채우기" if o.get("filler") else "직접" if o.get("manual") else "자동",
-                    **({"exec_price": num(r, "AbrdFutsExecPrc"), "exec_qty": int(r.get("ExecQty") or 0), "unfilled": int(r.get("UnercQty") or 0),
-                        "canceled": int(r.get("CancQty") or 0), "state": r.get("TpCodeNm")} if r else {})})
+        rs = chain(int(o["number"])) if o.get("number") else []
+        seen.update(int(r["OvrsFutsOrdNo"]) for r in rs)
+        out.append({**o, "kind": "정리" if o.get("flatten") else "지정가" if o.get("limit") else "횟수 채우기" if o.get("filler") else "직접" if o.get("manual") else "자동",
+                    **(filled(rs, o["time"]) if rs else {})})
     for n, r in rows.items():  # 이 프로그램 밖에서 낸 주문
-        if r.get("TrdTpNm") != "신규":
-            continue
-        last = r
-        while int(last.get("MdfyQty") or 0) and int(last["OvrsFutsOrdNo"]) in later:
-            last = later[int(last["OvrsFutsOrdNo"])]
-        if int(last["OvrsFutsOrdNo"]) in seen:  # 이 프로그램이 정정한 지정가의 처음 번호(기록은 정정된 새 번호로 바뀌어 있다)
+        if r.get("TrdTpNm") != "신규" or n in seen:  # seen: 이 프로그램이 낸(정정한) 지정가
             continue
         t = datetime.strptime(r["OrdDt"] + r["OrdTime"][:6], "%Y%m%d%H%M%S").replace(tzinfo=KST)
         if t.hour < 7:  # OrdDt는 CME 거래일(한국 07 ~ 08시에 시작): 그 앞 시각은 다음 날 새벽이다
             t += timedelta(days=1)
         sign = 1 if r.get("BnsTpCode") == "2" else -1
-        out.append({"time": int(t.timestamp()), **_exec_time(last, int(t.timestamp())), "symbol": r.get("IsuCodeVal"), "qty": sign * int(r.get("OrdQty") or 0), "number": str(n), "ok": True,
-                    "kind": "LS 앱", "price": num(r, "OvrsDrvtOrdPrc") or None, "exec_price": num(last, "AbrdFutsExecPrc"), "exec_qty": int(last.get("ExecQty") or 0),
-                    "unfilled": int(last.get("UnercQty") or 0), "canceled": int(last.get("CancQty") or 0), "state": last.get("TpCodeNm")})
+        out.append({"time": int(t.timestamp()), "symbol": r.get("IsuCodeVal"), "qty": sign * int(r.get("OrdQty") or 0), "number": str(n), "ok": True,
+                    "kind": "LS 앱", "price": num(r, "OvrsDrvtOrdPrc") or None, **filled(chain(n), int(t.timestamp()))})
     out.sort(key=lambda o: o["time"])
     _history.update(at=time.time(), data={"orders": out, "capital": config.CAPITAL, "multiplier": config.MULTIPLIER, "fee": 1.0,
                                           "start": config.LIVE["start"], "end": config.LIVE["end"]})
@@ -754,6 +767,8 @@ if __name__ == "__main__":
     assert modify_limit("0000000002", 30020.0) == {"number": "0000000004", "price": 30020.0}
     assert mods == [("0000000002", -2, 30020.0)] and any(o.get("number") == "0000000004" and o["price"] == 30020.0 for o in _state["orders"]), mods
     assert status["pending"] == [{"number": "0000000004", "qty": -2, "price": 30020.0, "limit": True}], status["pending"]
+    # 새 번호가 LS 내역에 아직 없어도(가짜 LS는 정정을 반영하지 않는다) 바로 다시 옮길 수 있다
+    assert modify_limit("0000000004", 30030.0)["price"] == 30030.0 and mods[-1] == ("0000000004", -2, 30030.0), mods
     for number, price in (("0000000009", 30020.0), ("0000000002", 30020.1)):
         try:
             modify_limit(number, price)
