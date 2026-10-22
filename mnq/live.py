@@ -668,7 +668,7 @@ if __name__ == "__main__":
     tick()
     assert sent == [2, -3], sent                  # 롱 2 → 숏 1: 매도 3
     _state["orders"][-1]["time"] -= CONFIRM + 1
-    paper._load = lambda: {config.LIVE["candidate"]: {"contracts": 99}}
+    paper._load = lambda: {config.LIVE["candidate"]: {"contracts": 999}}
     tick()
     assert sent == [2, -3] and "최대" in status["note"]
     paper._load = lambda: {config.LIVE["candidate"]: {"contracts": 0}}
@@ -692,7 +692,7 @@ if __name__ == "__main__":
     manual(-2)
     assert sent == [2, -3, 1, -2] and not _state["enabled"] and _state["orders"][-1]["manual"]  # 직접 주문은 자동 주문을 끈다
     book["pos"] = -2
-    for bad in (-30, 0, 1.5, True):  # 최대 초과(-32), 0, 소수, 참거짓은 거절
+    for bad in (-200, 0, 1.5, True):  # 최대 초과(-202), 0, 소수, 참거짓은 거절
         try:
             manual(bad)
             raise AssertionError(bad)
@@ -717,7 +717,7 @@ if __name__ == "__main__":
     assert status["pending"] == [{"number": "0000000002", "qty": -2, "price": 30010.25, "limit": True}]  # LS에 늦게 잡혀도 바로 미체결로 보인다
     limit_close(29990.0, 3)                       # 지정가 진입: 롱 2에 매수 3 → 체결되면 롱 5
     assert limits[-1] == (3, 29990.0) and _state["orders"][-1]["to"] == 5, limits
-    for bad in (19, 0, 1.5):                      # 최대 초과(21), 0, 소수는 거절
+    for bad in (199, 0, 1.5):                     # 최대 초과(201), 0, 소수는 거절
         try:
             limit_close(29990.0, bad)
             raise AssertionError(bad)

@@ -4,6 +4,7 @@
 """
 import logging
 
+import requests
 from flask import Flask, jsonify, redirect, request
 from werkzeug.exceptions import HTTPException
 
@@ -131,6 +132,30 @@ def api_live_flatten():
     _json()
     live.flatten()
     return jsonify(live.get_live())
+
+
+ADVISOR = ("너는 CME MNQ(Micro E-mini Nasdaq-100) 선물 매매를 돕는 조언가다. 한국어로 짧고 구체적으로 답한다. "
+           "아래 '지금 차트와 포지션'에 있는 숫자만 근거로 쓰고, 없는 값은 지어내지 말고 모른다고 한다. "
+           "가격은 손절·익절·진입 자리처럼 숫자로 제시한다. 1계약 = 지수 × $2, 1틱 0.25 = $0.5. "
+           "차트 신호로 방향을 맞히는 규칙은 과거 시험에서 비용 뒤 우위가 없었다는 점을 잊지 말고, 확신하는 말투를 피한다.")
+
+
+@app.post("/api/advice/chat")
+def api_advice_chat():
+    body = _json()
+    talk = [m for m in body.get("messages") or [] if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)][-12:]
+    if not talk:
+        raise ValueError("질문이 없습니다")
+    system = ADVISOR + "\n\n[지금 차트와 포지션]\n" + str(body.get("context") or "")[:6000]
+    try:
+        r = requests.post(f"{config.OLLAMA_URL}/api/chat", timeout=180, json={
+            "model": config.OLLAMA_MODEL, "stream": False, "options": {"num_predict": 800},  # 끝없이 이어 쓰는 경우를 끊는다
+            "messages": [{"role": "system", "content": system}, *talk]})
+    except requests.ConnectionError:
+        raise ValueError("Ollama가 꺼져 있습니다. Ollama를 켜고 다시 물어 주세요")
+    if not r.ok:
+        raise ValueError(f"Ollama 오류: {r.text[:200]} (모델이 없으면 ollama pull {config.OLLAMA_MODEL})")
+    return jsonify({"reply": r.json()["message"]["content"]})
 
 
 @app.get("/api/news")

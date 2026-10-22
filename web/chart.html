@@ -45,6 +45,7 @@
           <button data-study="rsi" aria-pressed="false" title="RSI 14">RSI</button>
           <button data-study="ichimoku" aria-pressed="false" title="일목균형표 9, 26, 52">일목</button>
           <input type="color" id="hline-color" class="hline-color" hidden title="고른 수평선의 색" aria-label="고른 수평선의 색">
+          <button data-clean aria-pressed="false" title="수평선·추세선·박스·일목균형표를 잠시 숨긴다(지우지 않음). 다시 누르면 보인다">숨기기</button>
           <button data-tool="clear" title="수평선·추세선·박스를 눌러 고른 뒤 지운다(Delete 키도 된다). 고른 것이 없으면 모두 지울지 묻는다">지우기</button>
         </nav>
         <svg id="draw" class="draw-layer" aria-hidden="true"></svg>
@@ -104,6 +105,16 @@
         <h2>매매법 <small id="why-note"></small></h2>
         <nav id="picks" class="pill-group pick-tabs" aria-label="차트에 표시할 매매법"></nav>
         <div id="why"></div>
+      </section>
+      <!-- 조언 채팅: 규칙으로 읽은 차트·포지션을 이 PC의 Ollama 모델에 같이 보내 묻고 답한다(토큰 요금 없음) -->
+      <section class="card advice-card">
+        <h2>조언 <small id="advice-note"></small>
+          <span class="card-actions"><button id="advice-btn" class="auto-toggle" type="button">조언 생성</button></span></h2>
+        <div id="advice" class="chat-log" aria-live="polite"><p class="why-foot">'조언 생성'을 누르거나 아래에 질문하세요. 지금 포지션과 차트(보고 있는 봉 단위)를 같이 보냅니다.</p></div>
+        <form id="advice-form" class="chat-form">
+          <input id="advice-input" type="text" autocomplete="off" aria-label="조언에 질문" placeholder="예: 지금 숏 들어가도 될까?">
+          <button type="submit">보내기</button>
+        </form>
       </section>
     </aside>
   </main>

@@ -242,7 +242,8 @@ function pointAt(p) {
 
 function renderDrawings() {
   // 수평선: 가격선으로(가격 축에 값이 보인다)
-  const want = new Set(draw.items.filter((d) => d.type === 'hline'));
+  const shown = draw.clean ? [] : draw.items;  // 숨기기: 그린 것은 그대로 두고 그리지만 않는다
+  const want = new Set(shown.filter((d) => d.type === 'hline'));
   hlines.forEach((line, d) => { if (!want.has(d)) { series.removePriceLine(line); hlines.delete(d); } });
   want.forEach((d) => {
     if (!hlines.has(d)) hlines.set(d, series.createPriceLine({ price: d.price, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: '' }));
@@ -250,11 +251,11 @@ function renderDrawings() {
     hlines.get(d).applyOptions({ color: d.color || token('--draw'), lineWidth: on ? 2 : 1, lineStyle: on ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid });
   });
   // 박스: 그리기 층(SVG)에. 그리는 중이면 커서까지 미리 보여 준다
-  const boxes = draw.items.filter((d) => d.type === 'box');
-  const trends = draw.items.filter((d) => d.type === 'trend');
+  const boxes = shown.filter((d) => d.type === 'box');
+  const trends = shown.filter((d) => d.type === 'trend');
   if (draw.start && draw.hover) (draw.tool === 'trend' ? trends : boxes).push({ a: draw.start, b: draw.hover, preview: true });
   const color = token('--accent');
-  $('draw').innerHTML = renderCloud(chart.timeScale().width()) + renderZones() + boxes.map((d) => {
+  $('draw').innerHTML = (draw.clean ? '' : renderCloud(chart.timeScale().width())) + renderZones() + boxes.map((d) => {
     const r = boxRect(d);
     if (!r) return '';
     const on = d === draw.selected;
@@ -340,7 +341,7 @@ function boxRect(d) {
 
 // 누른 자리에 있는 그린 것(위에 그린 것부터): 수평선은 위아래 5px, 박스는 안쪽이나 테두리 4px 안
 function hitTest(pt) {
-  if (!pt) return null;
+  if (!pt || draw.clean) return null;  // 숨긴 것은 눌러 고르지 못하게(안 보이는 것을 Delete로 지우지 않게)
   for (let i = draw.items.length - 1; i >= 0; i--) {
     const d = draw.items[i];
     if (d.type === 'hline') {
@@ -401,13 +402,22 @@ function renderCloud(width) {
 function renderTools() {
   $('tools').querySelectorAll('button').forEach((b) => {
     if (b.dataset.tool === 'clear') return;
+    if ('clean' in b.dataset) { b.classList.toggle('active', Boolean(draw.clean)); b.setAttribute('aria-pressed', Boolean(draw.clean)); return; }
     const on = b.dataset.tool ? draw.tool === b.dataset.tool : Boolean(draw.studies[b.dataset.study]);
     b.classList.toggle('active', on);
     b.setAttribute('aria-pressed', on);
   });
 }
+function setClean(on) {
+  draw.clean = on;
+  if (on) draw.selected = null;
+  [tenkanSeries, kijunSeries, chikouSeries].forEach((x) => x.applyOptions({ visible: !on }));
+  renderTools();
+  renderDrawings();
+}
 function setTool(tool) {
   draw.tool = draw.tool === tool ? null : tool;
+  if (draw.tool && draw.clean) setClean(false);  // 숨긴 채로 그리면 그린 것이 안 보이므로
   draw.start = draw.hover = null;
   $('chart-wrap').classList.toggle('drawing', Boolean(draw.tool));
   renderTools();
@@ -428,7 +438,8 @@ const notice = (text) => ask(text, '알림', true);
 $('tools').addEventListener('click', async (e) => {
   const b = e.target.closest('button');
   if (!b) return;
-  if (b.dataset.study) {
+  if ('clean' in b.dataset) setClean(!draw.clean);
+  else if (b.dataset.study) {
     draw.studies[b.dataset.study] = !draw.studies[b.dataset.study];
     keep('mnqStudies', draw.studies);
     renderTools();
@@ -1030,6 +1041,11 @@ function renderLive(d) {
   }
   $('live-note').textContent = d.started ? '' : `${fmtTime(d.start)} 대회 시작부터`;
   const orders = d.orders.slice(0, 3).map((o) => `<tr><td>${fmtTime(o.time)}</td><td>${o.ok ? `<b class="${tone(o.qty)}">${o.limit ? `지정가 ${fmtPrice(o.price)} ` : o.manual ? '직접 ' : o.filler ? '횟수 채우기 ' : ''}${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}</b> (${o.from} → ${o.to})` : `<span class="c-down">실패</span> ${o.error || ''}`}</td></tr>`).join('');
+  // LS가 주문을 거절하면(증거금 부족 등) 서버는 실패로 기록만 하고 성공 응답을 주므로, 기록에 새로 생긴 실패를 창으로 알린다(직접·자동 모두).
+  // 서버가 보내기 전에 막은 주문(최대 계약 수 등)은 기록되지 않고 누른 자리의 catch가 알린다. 처음 읽을 때는 지난 실패를 다시 띄우지 않는다
+  const failed = d.orders.filter((o) => !o.ok && o.time > (state.failSeen ?? Infinity));
+  state.failSeen = Math.max(state.failSeen ?? 0, ...d.orders.map((o) => o.time));
+  if (failed.length) notice(failed.map((o) => `${o.manual || o.limit ? '직접' : '자동'} 주문 ${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}계약이 거절됐습니다\n${o.error || '까닭 모름'}`).join('\n\n'));
   const t = $('auto-toggle');
   t.textContent = d.enabled ? '자동 주문 켜짐' : '자동 주문 꺼짐';
   t.classList.toggle('active', d.enabled);
@@ -1401,6 +1417,113 @@ $('picks').addEventListener('click', (ev) => {
   });
   grip.addEventListener('dblclick', () => { side.style.width = ''; localStorage.removeItem('mnqSide'); });
 })();
+
+// 조언: 누를 때만 만든다. 지금 포지션(LS 모의계좌) + 보고 있는 봉의 추세(EMA 20·50)·MACD·RSI·최근 20봉 고저·ATR·마지막 봉 모양을 규칙으로 읽는다.
+// 연구(r1 ~ r20)에서 차트로 방향을 맞히는 규칙은 모두 불통과였으므로 '예측'이 아니라 손절·익절 자리를 정리해 주는 점검표다
+function advise() {
+  const bars = state.bars;
+  if (bars.length < 60) return '<p class="why-foot">봉이 60개 이상 있어야 조언을 만들 수 있습니다.</p>';
+  const closes = bars.map((b) => b.close), last = bars[bars.length - 1];
+  const price = state.quote ? state.quote.price : last.close;
+  const e20 = ema(closes, 20), e50 = ema(closes, 50), k = closes.length - 1;
+  const fast = ema(closes, 12), slow = ema(closes, 26), line = closes.map((_, i) => fast[i] - slow[i]), sig = ema(line, 9);
+  const hist = line[k] - sig[k], histPrev = line[k - 1] - sig[k - 1];
+  let up = 0, down = 0, atr = 0;
+  for (let i = 1; i <= k; i++) {
+    const ch = closes[i] - closes[i - 1];
+    up = (up * 13 + Math.max(ch, 0)) / 14;
+    down = (down * 13 + Math.max(-ch, 0)) / 14;
+    atr = (atr * 13 + Math.max(bars[i].high, closes[i - 1]) - Math.min(bars[i].low, closes[i - 1])) / 14;
+  }
+  const rsi = down ? 100 - 100 / (1 + up / down) : 100;
+  const recent = bars.slice(-21, -1), hi = Math.max(...recent.map((b) => b.high)), lo = Math.min(...recent.map((b) => b.low));
+  const trend = price > e20[k] && e20[k] > e50[k] ? 1 : price < e20[k] && e20[k] < e50[k] ? -1 : 0;
+  const slope = e20[k] - e20[k - 5];
+  const dc = state.dailyCloses, sma200 = dc && dc.length >= 200 ? dc.slice(-200).reduce((a, v) => a + v, 0) / 200 : null;
+  const body = Math.abs(last.close - last.open), range = last.high - last.low || 1;
+  const upperWick = last.high - Math.max(last.open, last.close), lowerWick = Math.min(last.open, last.close) - last.low;
+  const shape = upperWick > 2 * body && upperWick > range / 2 ? ['윗꼬리 긴 봉', '위에서 파는 힘', -1]
+    : lowerWick > 2 * body && lowerWick > range / 2 ? ['아랫꼬리 긴 봉', '아래에서 사는 힘', 1]
+    : body > range * 0.7 ? [last.close > last.open ? '장대 양봉' : '장대 음봉', '한쪽으로 강하게', last.close > last.open ? 1 : -1]
+    : ['보통 봉', '뚜렷한 모양 없음', 0];
+  // 방향 점수: 추세 ±1, MACD 히스토그램 ±1, 200일선 ±1, 봉 모양 ±1 (RSI 극단은 반대쪽으로 ±1)
+  const score = trend + Math.sign(hist) + (sma200 ? Math.sign(price - sma200) : 0) + shape[2] + (rsi > 70 ? -1 : rsi < 30 ? 1 : 0);
+  const pts = (v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}pt`;
+  const read = [
+    ['추세', `${trend > 0 ? '상승' : trend < 0 ? '하락' : '횡보'} <small>(EMA20 ${fmtPrice(e20[k])} · EMA50 ${fmtPrice(e50[k])}, 20선 5봉 기울기 ${pts(slope)})</small>`, trend ? trend > 0 : null],
+    ['MACD', `히스토그램 ${hist >= 0 ? '플러스' : '마이너스'}${Math.sign(hist) !== Math.sign(histPrev) ? ' <b>(방금 뒤집힘)</b>' : Math.abs(hist) < Math.abs(histPrev) ? ' (줄어드는 중)' : ' (커지는 중)'}`, hist > 0],
+    ['RSI 14', `${rsi.toFixed(0)}${rsi > 70 ? ' 과매수' : rsi < 30 ? ' 과매도' : ''}`, rsi > 70 || rsi < 30 ? false : null],
+    ['20봉 고저', `${fmtPrice(lo)} ~ ${fmtPrice(hi)} <small>(지금 ${Math.round((price - lo) / (hi - lo || 1) * 100)}% 자리)</small>`, null],
+    ['200일선', sma200 ? `${fmtPrice(sma200)} ${price > sma200 ? '위' : '아래'}` : '일봉 자료 없음', sma200 ? price > sma200 : null],
+    ['봉 모양', `${shape[0]} <small>(${shape[1]})</small>`, shape[2] ? shape[2] > 0 : null],
+    ['ATR 14', `${atr.toFixed(2)}pt <small>(1계약 ${fmtMoney(atr * 2, 0)})</small>`, null],
+  ];
+  const p = account && account.view && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
+  const stop = (side) => side > 0 ? Math.min(lo, price - 1.5 * atr) : Math.max(hi, price + 1.5 * atr);
+  const view = score >= 2 ? '위쪽 우세' : score <= -2 ? '아래쪽 우세' : '방향 불분명';
+  let advice;
+  if (!p || !p.qty) {
+    advice = score >= 2 ? [['할 일', `롱을 생각한다면 추격 대신 EMA20(${fmtPrice(e20[k])}) 근처 지정가 매수`, true], ['손절', `${fmtPrice(stop(1))} 아래`, null], ['목표', `20봉 고점 ${fmtPrice(hi)}`, null]]
+      : score <= -2 ? [['할 일', `숏을 생각한다면 EMA20(${fmtPrice(e20[k])}) 근처로 되돌릴 때 지정가 매도`, true], ['손절', `${fmtPrice(stop(-1))} 위`, null], ['목표', `20봉 저점 ${fmtPrice(lo)}`, null]]
+      : [['할 일', '관망. 신호가 엇갈려 새로 들어갈 이유가 약합니다', null], ['기다릴 것', `${fmtPrice(hi)} 위로 넘거나 ${fmtPrice(lo)} 아래로 깨질 때`, null]];
+  } else {
+    const side = Math.sign(p.qty), with_ = score * side, s = stop(side);
+    const gain = (price - p.entry) * side;
+    advice = [
+      ['지금', `${position(p.qty)} · 진입 ${fmtPrice(p.entry)} · ${pts(gain)} (${fmtMoney(p.pnl)})`, gain >= 0],
+      ['판단', with_ >= 2 ? '차트가 포지션 쪽입니다. 들고 가되 손절선을 지킵니다'
+        : with_ <= -2 ? '차트가 포지션 반대쪽입니다. 줄이거나 정리를 생각할 때입니다'
+        : '신호가 엇갈립니다. 늘리지 말고 손절선만 지킵니다', with_ >= 2 ? true : with_ <= -2 ? false : null],
+      ['손절', `${fmtPrice(gain > 1.5 * atr ? Math.max(s * side, p.entry * side) * side : s)}${gain > 1.5 * atr ? ' <small>(이익이 ATR 1.5배를 넘어 본전 이상으로 올림)</small>' : ' <small>(20봉 고저 또는 ATR 1.5배)</small>'}`, null],
+      ['익절', side > 0 ? `${fmtPrice(hi)} 근처${rsi > 70 ? ', RSI 과매수라 일부 익절도 고려' : ''}` : `${fmtPrice(lo)} 근처${rsi < 30 ? ', RSI 과매도라 일부 익절도 고려' : ''}`, null],
+    ];
+    if (p.liq && Math.abs(price - p.liq) < 5 * atr) advice.push(['주의', `청산가(추정) ${fmtPrice(p.liq)}까지 ATR 5배 안쪽입니다. 계약을 줄이세요`, false]);
+  }
+  return whyBlock(`차트 읽기 <small>(${INTERVALS[state.interval]}봉)</small>`, view, read)
+    + whyBlock('조언', null, advice)
+    + '<p class="why-foot">규칙으로 만든 점검표입니다. 연구에서 차트 신호로 방향을 맞히는 규칙은 모두 비용 뒤 우위가 없었습니다. 자동 주문 중이면 직접 주문 시 자동 주문이 꺼집니다.</p>';
+}
+// 조언 채팅: 질문마다 그 순간의 차트 읽기(advise의 글자) + 최근 30봉을 같이 보낸다. 대화는 새로고침하면 지워진다
+const chat = [];
+const chatContext = () => {
+  const div = document.createElement('div');
+  div.innerHTML = advise();
+  const recent = state.bars.slice(-30).map((b) => `${fmtTime(b.time)} 시${b.open} 고${b.high} 저${b.low} 종${b.close}`).join('\n');
+  return div.innerText + `\n\n최근 ${INTERVALS[state.interval]}봉 30개(한국 시각):\n${recent}`;
+};
+function renderChat(waiting) {
+  const esc = (t) => t.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  $('advice').innerHTML = chat.map((m) => `<div class="chat-msg ${m.role}">${esc(m.content)}</div>`).join('')
+    + (waiting ? '<div class="chat-msg assistant wait">생각하는 중…</div>' : '');
+  $('advice').scrollTop = $('advice').scrollHeight;
+}
+async function askAdvisor(question) {
+  chat.push({ role: 'user', content: question });
+  renderChat(true);
+  $('advice-form').querySelectorAll('input, button').forEach((x) => { x.disabled = true; });
+  $('advice-btn').disabled = true;
+  try {
+    const d = await post('/api/advice/chat', { messages: chat, context: chatContext() });
+    chat.push({ role: 'assistant', content: d.reply });
+    $('advice-note').textContent = `${fmtTime(Date.now() / 1000)} 답변`;
+  } catch (e) {
+    chat.pop();  // 실패한 질문은 대화에서 빼고 입력칸에 되돌려 다시 보낼 수 있게
+    $('advice-input').value = question;
+    $('advice-note').textContent = e.message;
+  }
+  $('advice-form').querySelectorAll('input, button').forEach((x) => { x.disabled = false; });
+  $('advice-btn').disabled = false;
+  renderChat();
+  $('advice-input').focus();
+}
+$('advice-btn').addEventListener('click', () => askAdvisor('지금 포지션과 차트를 보고 어떻게 하면 좋을지 조언해 줘.'));
+$('advice-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const q = $('advice-input').value.trim();
+  if (!q) return;
+  $('advice-input').value = '';
+  askAdvisor(q);
+});
 
 document.addEventListener('themechange', () => renderMarkers());
 renderTools();
