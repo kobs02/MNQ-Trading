@@ -906,8 +906,9 @@ function mtfMarkers(first) {
     };
   });
 }
-// 새 중·강 신호가 오면 소리: 중은 한 번, 강은 세 번. 매수는 높은 음, 매도는 낮은 음. 처음 받은 신호는 지난 것이라 울리지 않는다
-let mtfSeen = null, audio = null;
+// 새 신호가 오면 소리: 알람 켠 근거 세기만(오른쪽 칸 범례 아래에서 고름, 기본 중·강). 강은 세 번, 나머지는 한 번.
+// 매수는 높은 음, 매도는 낮은 음. 처음 받은 신호는 지난 것이라 울리지 않는다
+let mtfSeen = null, audio = null, mtfAlarm = load('mnqMtfAlarm', [2, 3]);
 document.addEventListener('pointerdown', () => { audio = audio || new AudioContext(); }, { once: true });  // 브라우저는 클릭 전에는 소리를 막는다
 function beep(freq, at) {
   const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime + at;
@@ -920,7 +921,7 @@ function beep(freq, at) {
 }
 function mtfAlert() {
   const list = state.mtf || [], last = list.length ? list[list.length - 1].time : 0;
-  const fresh = mtfSeen === null ? [] : list.filter((s) => s.time > mtfSeen && s.level >= 2);
+  const fresh = mtfSeen === null ? [] : list.filter((s) => s.time > mtfSeen && mtfAlarm.includes(s.level));
   mtfSeen = Math.max(mtfSeen || 0, last);
   const s = fresh.sort((a, b) => b.level - a.level)[0];  // 한꺼번에 여럿이면 가장 센 것 하나만
   if (!s || !audio) return;
@@ -938,10 +939,16 @@ function mtfLegend() {
     + `<ul class="mtf-legend">${row(3, '2개 이상 꺾임 + RSI 과매도(매수 &lt; 30)·과매수(매도 &gt; 70)', '금색 큰 화살표 · 가상 계좌 1계약')}`
     + `${row(2, '3개 이상 같은 방향으로 꺾임', '진한 보통 화살표 · 가상 계좌 1계약')}${row(1, '2개 같은 방향으로 꺾임', '옅은 작은 화살표 · 표시만')}</ul>`
     + '<p class="why-foot">화살표 옆 숫자는 함께 꺾인 분봉입니다(예: 1 / 5 = 1분봉과 5분봉, 60 = 1시간봉).</p>'
+    + `<p class="why-foot mtf-alarm">🔔 알람 ${[3, 2, 1].map((lv) => `<label><input type="checkbox" data-alarm="${lv}"${mtfAlarm.includes(lv) ? ' checked' : ''}> ${lv === 3 ? '★' : ''}${MTF[lv].name}</label>`).join('')}</p>`
     + (s ? `<p class="why-sum">마지막 신호 ${fmtTime(s.time + 60)} · <b class="${s.level === 3 ? 'mtf-gold' : tone(s.side)}">${s.level === 3 ? '★' : ''}${MTF[s.level].name} ${s.side > 0 ? '▲ 매수' : '▼ 매도'}</b> ${mtfTfs(s)}`
       + (s.level === 3 ? ` · RSI ${mtfRsi(s)}` : '') + '</p>' : '') + '</div>';
 }
 setInterval(() => { if (current() && current().mtf) loadMtf(); }, 60000);
+$('why').addEventListener('change', (e) => {
+  if (!e.target.dataset.alarm) return;
+  mtfAlarm = [...$('why').querySelectorAll('[data-alarm]:checked')].map((b) => Number(b.dataset.alarm));
+  keep('mnqMtfAlarm', mtfAlarm);
+});
 
 // ---------- 오른쪽 칸 ----------
 function rows(list) {
@@ -1210,7 +1217,14 @@ $('limit-open').addEventListener('click', async (e) => {
 });
 // 처음 시세가 오면 지정가 칸에 지금 가격을 채워 둔다(사용자가 고친 값은 건드리지 않는다)
 const fillLimit = () => { if (state.quote && !$('limit-price').value) $('limit-price').value = state.quote.price; };
-$('limit-now').addEventListener('click', () => { if (state.quote) $('limit-price').value = state.quote.price; });
+let nowLine = null;  // '최신 가격'을 누른 순간의 가격. 다시 누르면 옮긴다
+$('limit-now').addEventListener('click', () => {
+  if (!state.quote) return;
+  const price = state.quote.price;
+  $('limit-price').value = price;
+  if (nowLine) nowLine.applyOptions({ price });
+  else nowLine = series.createPriceLine({ price, color: token('--text-2'), lineWidth: 1, lineStyle: LightweightCharts.LineStyle.LargeDashed, axisLabelVisible: true, title: '최신 가격' });
+});
 
 $('live').addEventListener('click', (e) => { if (e.target.closest('[data-cancel]')) cancelPending(); });
 

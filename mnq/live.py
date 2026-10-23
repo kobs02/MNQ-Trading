@@ -568,19 +568,20 @@ def _build_history():
         day, today = datetime.fromtimestamp(config.LIVE["start"], KST).date(), datetime.strptime(ls.order_day(), "%Y%m%d").date()
         while day <= today:  # 지금 거래일만 LS에 다시 묻는다
             for r in _day_orders(symbol, day, done=day < today):
-                rows[int(r["OvrsFutsOrdNo"])] = r
+                # LS 주문번호는 거래일마다 새로 매긴다(10-19와 10-23에 둘 다 2229): 번호만으로 찾으면 지난 주문이 오늘 체결을 가져간다
+                rows[f"{day:%Y%m%d}", int(r["OvrsFutsOrdNo"])] = r
             day += timedelta(days=1)
-    later = {int(r["OvrsFutsOrgOrdNo"]): r for r in rows.values() if r.get("TrdTpNm") == "정정"}  # 원래 번호 → 그것을 정정한 주문
-    earlier = {int(r["OvrsFutsOrdNo"]): int(r["OvrsFutsOrgOrdNo"]) for r in rows.values() if r.get("TrdTpNm") == "정정"}
+    later = {(d, int(r["OvrsFutsOrgOrdNo"])): r for (d, _), r in rows.items() if r.get("TrdTpNm") == "정정"}  # 원래 번호 → 그것을 정정한 주문
+    earlier = {k: (k[0], int(r["OvrsFutsOrgOrdNo"])) for k, r in rows.items() if r.get("TrdTpNm") == "정정"}
     num = lambda r, k: float(r.get(k) or 0)
 
     def chain(n):
-        """정정으로 이어진 주문들(처음 ~ 마지막). 기록의 번호는 처음 것일 수도 마지막 것일 수도 있다."""
+        """정정으로 이어진 주문들(처음 ~ 마지막). n = (거래일, 번호). 기록의 번호는 처음 것일 수도 마지막 것일 수도 있다."""
         while n in earlier and earlier[n] in rows:
             n = earlier[n]
         rs = [rows[n]] if n in rows else []
-        while rs and int(rs[-1].get("MdfyQty") or 0) and int(rs[-1]["OvrsFutsOrdNo"]) in later:
-            rs.append(later[int(rs[-1]["OvrsFutsOrdNo"])])
+        while rs and int(rs[-1].get("MdfyQty") or 0) and (n[0], int(rs[-1]["OvrsFutsOrdNo"])) in later:
+            rs.append(later[n[0], int(rs[-1]["OvrsFutsOrdNo"])])
         return rs
 
     def filled(rs, ordered):
@@ -592,8 +593,10 @@ def _build_history():
 
     out, seen = [], set()
     for o in mine:
-        rs = chain(int(o["number"])) if o.get("number") else []
-        seen.update(int(r["OvrsFutsOrdNo"]) for r in rs)
+        # shortcut: 낸 시각의 거래일로 찾는다. 거래일을 넘겨 정정한 지정가는 못 찾는데, 그런 일이 생기면 정정 기록에 거래일을 남긴다
+        day = ls.order_day(o["time"])
+        rs = chain((day, int(o["number"]))) if o.get("number") else []
+        seen.update((day, int(r["OvrsFutsOrdNo"])) for r in rs)
         out.append({**o, "kind": "정리" if o.get("flatten") else "지정가" if o.get("limit") else "횟수 채우기" if o.get("filler") else "직접" if o.get("manual") else "자동",
                     **(filled(rs, o["time"]) if rs else {})})
     for n, r in rows.items():  # 이 프로그램 밖에서 낸 주문
@@ -603,7 +606,7 @@ def _build_history():
         if t.hour < 7:  # OrdDt는 CME 거래일(한국 07 ~ 08시에 시작): 그 앞 시각은 다음 날 새벽이다
             t += timedelta(days=1)
         sign = 1 if r.get("BnsTpCode") == "2" else -1
-        out.append({"time": int(t.timestamp()), "symbol": r.get("IsuCodeVal"), "qty": sign * int(r.get("OrdQty") or 0), "number": str(n), "ok": True,
+        out.append({"time": int(t.timestamp()), "symbol": r.get("IsuCodeVal"), "qty": sign * int(r.get("OrdQty") or 0), "number": str(n[1]), "ok": True,
                     "kind": "LS 앱", "price": num(r, "OvrsDrvtOrdPrc") or None, **filled(chain(n), int(t.timestamp()))})
     out.sort(key=lambda o: o["time"])
     _history.update(at=time.time(), data={"orders": out, "capital": config.CAPITAL, "multiplier": config.MULTIPLIER, "fee": 1.0,

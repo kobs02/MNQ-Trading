@@ -1074,6 +1074,8 @@ dl.info dd small { color: var(--text-3); }
 .mtf-legend span:last-child { color: var(--text-2); }
 .mtf-legend small { display: block; color: var(--text-3); font-size: 12px; }
 .mtf-gold { color: #f0b90b; }
+.mtf-alarm { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.mtf-alarm label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
 .why-sum, .why-next { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--border); font-size: 14px; color: var(--text-2); }
 .why-next { padding-top: 0; border-top: 0; margin-top: 8px; }
 .why-sum b, .why-next b { color: var(--text); }

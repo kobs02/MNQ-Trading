@@ -13,11 +13,12 @@ function walk(orders, mult, fee) {
   return orders.map((o) => {
     const qty = o.exec_qty != null ? Math.sign(o.qty) * o.exec_qty : o.ok ? o.qty : 0;  // LS 체결 수량이 없으면 낸 수량이 다 체결됐다고 본다
     const px = o.exec_price || o.price;
-    let realized = null;
+    let realized = null, ret = null;
     if (qty && px) {
       if (pos && Math.sign(qty) !== Math.sign(pos)) {
         const closed = Math.min(Math.abs(qty), Math.abs(pos));
         realized = closed * Math.sign(pos) * (px - avg) * mult;
+        ret = Math.sign(pos) * (px - avg) / avg;  // 평균 진입가 대비(숏은 내리면 +)
         const left = pos + qty;
         avg = Math.sign(left) === Math.sign(pos) || !left ? avg : px;  // 뒤집혔으면 넘친 몫은 체결가에 새로 연다
         pos = left;
@@ -26,7 +27,7 @@ function walk(orders, mult, fee) {
         pos += qty;
       }
     }
-    return { ...o, filled: qty, px, realized, fee: Math.abs(qty) * 2 * fee, pos };
+    return { ...o, filled: qty, px, realized, ret, fee: Math.abs(qty) * 2 * fee, pos };
   });
 }
 
@@ -42,7 +43,7 @@ function renderRows() {
     return `<tr><td${r.order_time ? ` title="주문 낸 시각 ${fmtTime(r.order_time)}"` : ''}>${fmtTime(r.time)}</td><td>${r.kind}</td><td><b class="${tone(r.qty)}">${r.qty > 0 ? '매수' : '매도'} ${Math.abs(r.qty)}</b></td>`
       + `<td>${r.from != null ? `${side(r.from)} → ${side(r.to)}` : `→ ${side(r.pos)}`}</td><td>${fmtPrice(r.price)}</td><td>${r.exec_price ? fmtPrice(r.exec_price) : '-'}</td>`
       + `<td class="${slip > 0 ? 'c-down' : slip < 0 ? 'c-up' : ''}">${slip == null ? '-' : `${slip > 0 ? '+' : ''}${slip.toFixed(1)}틱`}</td>`
-      + `<td>${r.realized == null ? '-' : `<b class="${tone(r.realized)}">${fmtMoney(r.realized)}</b>`}</td><td>${r.filled ? fmtMoney(r.fee) : '-'}</td><td>${state}</td><td>${r.number || '-'}</td></tr>`;
+      + `<td>${r.realized == null ? '-' : `<b class="${tone(r.realized)}">${fmtMoney(r.realized)}</b> <small class="${tone(r.realized)}">(${fmtSigned(r.ret, 2)})</small>`}</td><td>${r.filled ? fmtMoney(r.fee) : '-'}</td><td>${state}</td><td>${r.number || '-'}</td></tr>`;
   }).join('') : '<tr><td colspan="11" class="empty">아직 주문이 없습니다.</td></tr>';
   $('pager').hidden = pages < 2;
   $('pager').innerHTML = `<button type="button" class="plain-button" data-go="-1"${page ? '' : ' disabled'}>← 최근</button>`
@@ -56,7 +57,7 @@ $('pager').addEventListener('click', (e) => {
   renderRows();
 });
 
-function render(d) {
+function render(d, acct) {
   const rows = walk(d.orders, d.multiplier, d.fee);
   const fills = rows.filter((r) => r.filled);
   const closes = rows.filter((r) => r.realized != null);
@@ -69,12 +70,22 @@ function render(d) {
     stat('실현 손익 (증권사 수수료 뺌)', `<span class="${tone(gross - broker)}">${fmtMoney(gross - broker)}</span>`, `LS 계좌와 같은 값 · 수수료 전 ${fmtMoney(gross)}, 수수료 ${fmtMoney(broker)}`),
     stat('체결', `${fills.length}건`, `${fills.reduce((s, r) => s + Math.abs(r.filled), 0)}계약`),
     stat('청산 승률', closes.length ? `${Math.round((wins / closes.length) * 100)}%` : '-', `${wins} / ${closes.length}`),
-  ].join('');
+  ].join('') + mismatch(rows, gross - broker, acct, d.capital);
   table = rows.slice().reverse();
   renderRows();
   renderCalendar(rows, d);
   $('updated').textContent = `${new Date().toLocaleTimeString('ko-KR')} 조회`;
   return renderChart(rows);
+}
+
+// 맞춰 보기: 기록으로 다시 계산한 실현 손익·포지션이 LS 계좌(평가손익 뺀 자산, 실제 포지션)와 다르면 경고한다.
+// 10-23: LS 주문번호가 거래일마다 새로 매겨져 지난 주문이 오늘 체결을 가져가 실현 손익이 틀렸었다($39 → $526)
+function mismatch(rows, realized, acct, capital) {
+  if (!acct || acct.cash == null) return '';
+  const pos = rows.length ? rows[rows.length - 1].pos : 0, real = acct.positions.reduce((s, p) => s + p.qty, 0);
+  const gap = realized - (acct.cash - capital);
+  if (Math.abs(gap) < 1 && pos === real) return '';
+  return `<div class="c-down"><span>⚠ LS 계좌와 다름</span><b>${fmtMoney(gap)}</b><em>기록 포지션 ${side(pos)} · LS ${side(real)}. 기록의 체결 맞추기가 틀렸을 수 있습니다</em></div>`;
 }
 
 // 대회 달력: 한국 날짜마다 닫은 몫의 손익 - 그날 체결의 수수료(대회 기준). 대회 첫 주 월요일부터 마지막 날이 든 주까지, 주마다 한 줄
@@ -211,9 +222,9 @@ function renderLabels() {
 
 async function tick() {
   try {
-    const r = await fetch('/api/live/history');
+    const [r, a] = await Promise.all([fetch('/api/live/history'), fetch('/api/account').catch(() => null)]);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    await render(await r.json());
+    await render(await r.json(), a && a.ok ? await a.json() : null);  // 계좌를 못 읽으면 맞춰 보기만 건너뛴다
   } catch (e) {
     $('updated').textContent = '불러오지 못했습니다: ' + e.message;
   }
