@@ -13,6 +13,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,7 @@ EVERY = 30
 _lock = threading.Lock()
 _last_order = [0.0]  # 마지막 주문 시각(_watch_pending이 그 뒤 1분 동안 미체결을 자주 본다)
 _busy = threading.Lock()  # 자동 주문(tick)과 화면의 직접 주문이 동시에 나가지 않게
+_acted = [0]  # 버튼 주문(정리·시장가·지정가·정정·취소) 횟수: tick이 그 전에 읽은 포지션으로 주문하지 않게
 _state = None
 status = {"checked": None, "target": None, "actual": None, "error": None, "note": None}
 
@@ -62,6 +64,16 @@ def market_open(ny):
     return h != 17
 
 
+@contextmanager
+def _button():
+    """화면 버튼의 주문: tick은 LS 조회를 잠금 밖에서 하므로 버튼은 tick의 주문 한 건만 기다린다."""
+    with _busy:
+        try:
+            yield
+        finally:
+            _acted[0] += 1
+
+
 def set_enabled(on):
     with _lock:
         _load().update(enabled=bool(on), flatten=False)
@@ -74,15 +86,20 @@ def flatten():
     CME가 쉬는 시간(또는 대회 전)이면 목표를 0계약으로 걸어 두고, 열린 뒤 30초 확인이 닫고 0이 확인되면 자동 주문을 끈다."""
     symbol = paper.status["symbol"]
     if symbol and started() and market_open(datetime.now(NY)):
-        with _busy:
+        with _button():
             with _lock:
                 _load().update(enabled=False, flatten=False)
                 _save()
-            for o in _pending(symbol):  # 지정가가 남아 있으면 닫은 뒤에 체결돼 반대 포지션이 생길 수 있다
+            # manual처럼 미체결과 포지션을 같이 묻는다(차례로 물으면 주문 전 기다림이 두세 배)
+            with ThreadPoolExecutor(2) as pool:
+                rows, net = pool.submit(_pending, symbol), pool.submit(ls.positions)
+                rows, actual = rows.result(), int(net.result()[0].get(symbol, 0))
+            for o in rows:  # 지정가가 남아 있으면 닫은 뒤에 체결돼 반대 포지션이 생길 수 있다
                 ls.cancel(symbol, o["OvrsFutsOrdNo"])
                 log.warning("LS 모의계좌: 정리 전에 미체결 주문 %s를 취소했습니다", o["OvrsFutsOrdNo"])
-            _pending(symbol)
-            actual = int(ls.positions()[0].get(symbol, 0))
+            if rows:  # 취소 전에 체결됐을 수 있으니 취소한 경우에만 다시 읽는다
+                _pending(symbol)
+                actual = int(ls.positions()[0].get(symbol, 0))
             if not actual:
                 return
             ny = datetime.now(NY)
@@ -157,7 +174,7 @@ def manual(qty=None, flip=False, reduce=None):
     ny = datetime.now(NY)
     if not market_open(ny):
         raise ValueError("CME가 쉬는 시간입니다")
-    with _busy:
+    with _button():
         with _lock:
             _load().update(enabled=False, flatten=False)
             _save()
@@ -300,13 +317,16 @@ def limit_close(price, qty=None, reduce=None):
     ny = datetime.now(NY)
     if not market_open(ny):
         raise ValueError("CME가 쉬는 시간입니다")
-    with _busy:
+    with _button():
         with _lock:
             _load().update(enabled=False, flatten=False)
             _save()
-        if _pending(symbol):
+        with ThreadPoolExecutor(2) as pool:
+            rows, net = pool.submit(_pending, symbol), pool.submit(ls.positions)
+            rows, net = rows.result(), net.result()[0]
+        if rows:
             raise ValueError("미체결 주문이 있습니다(먼저 취소하세요)")
-        actual = int(ls.positions()[0].get(symbol, 0))
+        actual = int(net.get(symbol, 0))
         close = qty is None
         if close and not actual:
             raise ValueError("정리할 포지션이 없습니다")
@@ -346,7 +366,7 @@ def _check_price(price):
 def modify_limit(number, price):
     """화면에서 지정가 선을 끌어 옮기면: 그 미체결 지정가 주문의 가격을 정정한다. 정정되면 주문번호가 바뀌므로 기록도 새 번호로 고친다."""
     symbol = _check_price(price)
-    with _busy:
+    with _button():
         row = next((o for o in _open_rows(symbol) if o.get("OvrsFutsOrdNo") == number), None)
         held = _hold.get(number)
         if row and row.get("AbrdFutsOrdPtnCode") == "2":
@@ -376,7 +396,7 @@ def cancel_pending(number=None):
     symbol = paper.status["symbol"]
     if not symbol:
         raise ValueError("아직 종목을 모릅니다")
-    with _busy:
+    with _button():
         _pending(symbol)
         # 방금 낸 주문은 LS 내역에 아직 없을 수 있으므로 화면에 보이는 미체결(_hold 포함)을 취소한다
         numbers = [p["number"] for p in status["pending"] if number is None or p["number"] == number]
@@ -416,21 +436,27 @@ def tick():
             _verify_unfilled(paper.status["symbol"], time.time())
         except Exception as e:
             log.warning("LS 미체결만 묻기 점검 실패: %s", e)
-    with _busy:
-        _tick()
-
-
-def _tick():
-    now = time.time()
-    ny = datetime.now(NY)
     symbol = paper.status["symbol"]
     if not symbol:
         return
+    seen = _acted[0]
+    # LS 조회는 잠금 밖에서 같이: 버튼 주문이 자동 확인의 조회(1 ~ 2초)를 기다리지 않게.
+    # 미체결은 자동 주문이 꺼져 있어도 화면에 (지정가 정리 등을) 보이게 늘 읽는다
+    with ThreadPoolExecutor(2) as pool:
+        net, pending = pool.submit(ls.positions), pool.submit(_pending, symbol)
+        net, pending = net.result()[0], pending.result()
+    with _busy:
+        if _acted[0] != seen:  # 읽는 사이 버튼 주문이 나갔다: 읽은 포지션이 낡았으니 다음 확인에 맞춘다
+            return
+        _tick(symbol, net, pending)
+
+
+def _tick(symbol, net, pending):
+    now = time.time()
+    ny = datetime.now(NY)
     target = _target()
-    net, _ = ls.positions()
     actual = int(net.get(symbol, 0))
     others = {s: q for s, q in net.items() if s != symbol and q}
-    pending = _pending(symbol)  # 자동 주문이 꺼져 있어도 화면에 미체결(지정가 정리 등)을 보이게 늘 읽는다
     status.update(checked=int(now), target=target, actual=actual, error=None, others=others)
     with _lock:
         state = _load()
@@ -809,6 +835,13 @@ if __name__ == "__main__":
     book["pos"] = -1
     tick()
     assert sent[-1] == -1, sent                  # 다시 숏 2로
+    # tick이 LS를 읽는 사이 버튼 주문이 끝나면 낡은 포지션으로 주문하지 않는다
+    _state["orders"][-1]["time"] -= CONFIRM + 1
+    n, positions = len(sent), ls.positions
+    ls.positions = lambda: (_acted.__setitem__(0, _acted[0] + 1), positions())[1]
+    tick()
+    ls.positions = positions
+    assert len(sent) == n, sent
     # 주 세기(한국 시각 월 ~ 일)와 금요일 뉴욕 14 ~ 17시
     mon = datetime(2026, 10, 19, 8, tzinfo=KST).timestamp()
     kst = lambda *d: datetime(*d, tzinfo=KST).timestamp()  # LS 주문 날짜는 CME 거래일: 한국 자정 넘어도 전날, 07시(겨울 08시)에 넘어간다
