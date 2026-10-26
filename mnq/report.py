@@ -122,9 +122,10 @@ def build():
     bars = minute_bars(fl[0][0])
     pts, mdd, top = curve(fl, bars, mult)
     contracts = sum(abs(q) for _, q, _ in fl)
-    contest = acct["equity"] - contracts * (COST / 2)  # LS 평가 자산에서 대회 차감(체결 1계약당 $1)을 더 뺀다
+    days = daily(fl, mult)
+    contest = capital + sum(v for _, _, v in days.values()) + acct["pnl"]  # LS 평가 자산은 그날 수수료를 늦게 빼서 기록으로 계산한다
     now = datetime.fromtimestamp(acct["at"], KST)
-    rows = "\n".join(f"| {k} | {n}건 | {c} | {v:+,.1f} | {v / capital:+.2%} |" for k, (n, c, v) in sorted(daily(fl, mult).items(), reverse=True))
+    rows = "\n".join(f"| {k} | {n}건 | {c} | {v:+,.1f} | {v / capital:+.2%} |" for k, (n, c, v) in sorted(days.items(), reverse=True))
     md = f"""# 수익률 보고서
 
 {now:%Y-%m-%d %H:%M} 기준 (한국 시각) · LS 모의계좌 · MNQ · 시작 자금 ${capital:,.0f}

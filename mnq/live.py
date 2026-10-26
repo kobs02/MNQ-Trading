@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import config, console, ls, paper
+from . import config, console, ls, paper, report
 
 log = logging.getLogger(__name__)
 NY = ZoneInfo("America/New_York")
@@ -524,7 +524,9 @@ def account():
         out.append({"symbol": r["IsuCodeVal"], "name": r.get("IsuNm"), "qty": n, "entry": num(r, "PchsPrc"), "price": now, "pnl": p,
                     "roe": p / im if im else None, "of_capital": p / config.CAPITAL, "margin": im, "fee": num(r, "CsgnCmsn"),
                     "liq": liq if liq > 0 else None})
-    _account.update(at=time.time(), data={"equity": equity, "deposit": deposit, "cash": equity - pnl, "realized": num(usd, "AbrdFutsLqdtPnlAmt"),
+    # 대회 기준 자산(평가손익 전): 주문 기록의 실현 손익 - 체결 1계약당 $2. LS 자산은 그날 수수료를 늦게 빼서(10-24 확인: 10-23 206계약분 $206이 아직 안 빠짐) 쓰지 않는다
+    booked = config.CAPITAL + sum(d[2] for d in report.daily(report.fills(history()["orders"]), config.MULTIPLIER).values())
+    _account.update(at=time.time(), data={"contest_cash": booked, "equity": equity, "deposit": deposit, "cash": equity - pnl, "realized": num(usd, "AbrdFutsLqdtPnlAmt"),
                                           "fees": num(usd, "AbrdFutsCmsnAmt"), "pnl": pnl, "margin": margin, "capital": config.CAPITAL,
                                           "ret": equity / config.CAPITAL - 1, "positions": out, "at": int(time.time())})
     return _account["data"]

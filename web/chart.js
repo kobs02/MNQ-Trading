@@ -1272,12 +1272,12 @@ function renderAccount() {
   renderRealEntry(pos.find((p) => q && p.symbol === q.symbol));
   const pnl = pos.reduce((s, p) => s + p.pnl, 0);
   const equity = (a.cash ?? a.deposit) + pnl;  // cash = 예탁금 + 청산손익 - 증권사 수수료
-  // 대회는 증권사 수수료와 별개로 체결 1계약당 $1을 더 뺀다. 증권사 수수료도 체결 1계약당 $1이라 같은 금액으로 본다
-  const contest = equity - (a.fees || 0);
+  // 대회 기준: 주문 기록의 실현 손익 - 체결 1계약당 $2(증권사 + 대회 차감) + 지금 평가손익. a.fees는 그날 몫뿐이라 누적 차감에 못 쓴다
+  const contest = a.contest_cash + pnl;
   $('account-note').textContent = `${fmtTime(a.at)} 조회`;
   $('account-sum').innerHTML = [
     ['평가 자산', `<b>${fmtMoney(equity)}</b>`],
-    ['대회 수익률', `<b class="${tone(contest - a.capital)}" title="평가 자산에서 대회 차감(체결 1계약당 $1, 지금까지 ${fmtMoney(a.fees || 0)})을 더 뺀 값">${fmtSigned(contest / a.capital - 1, 3)}</b>`],
+    ['대회 수익률', `<b class="${tone(contest - a.capital)}" title="주문 기록의 실현 손익에서 체결 1계약당 $2(증권사 수수료 + 대회 차감)를 빼고 평가손익을 더한 값">${fmtSigned(contest / a.capital - 1, 3)}</b>`],
     ['실현 손익', `<b class="${tone(a.realized)}">${fmtMoney(a.realized || 0)}</b> <small>(수수료 ${fmtMoney(a.fees || 0)})</small>`],
     ['미실현 손익', `<b class="${tone(pnl)}">${fmtMoney(pnl)}</b>`],
     ['사용 증거금', fmtMoney(a.margin, 0)],

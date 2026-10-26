@@ -84,7 +84,11 @@ function mismatch(rows, realized, acct, capital) {
   if (!acct || acct.cash == null) return '';
   const pos = rows.length ? rows[rows.length - 1].pos : 0, real = acct.positions.reduce((s, p) => s + p.qty, 0);
   const gap = realized - (acct.cash - capital);
-  if (Math.abs(gap) < 1 && pos === real) return '';
+  // LS는 마지막 거래일의 수수료를 늦게 뺀다(10-24: 10-23 206계약분이 AbrdFutsCmsnAmt 0으로 안 빠짐). 그만큼 차이는 정상
+  const day = (t) => new Date((t - 7 * 3600) * 1000).toDateString();  // CME 거래일은 한국 07시쯤 바뀐다(대략)
+  const last = rows.filter((r) => r.filled).at(-1);
+  const unbooked = last ? rows.filter((r) => r.filled && day(r.time) === day(last.time)).reduce((s, r) => s + Math.abs(r.filled), 0) - (acct.fees || 0) : 0;
+  if ((Math.abs(gap) < 1 || (unbooked > 0 && Math.abs(gap + unbooked) < 1)) && pos === real) return '';
   return `<div class="c-down"><span>⚠ LS 계좌와 다름</span><b>${fmtMoney(gap)}</b><em>기록 포지션 ${side(pos)} · LS ${side(real)}. 기록의 체결 맞추기가 틀렸을 수 있습니다</em></div>`;
 }
 
