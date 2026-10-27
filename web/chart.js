@@ -167,7 +167,8 @@ chart.subscribeCrosshairMove((p) => {
 });
 
 // ---------- 자동매매 표시 ----------
-const current = () => state.trading && (state.trading.candidates.find((c) => c.key === state.candidate)
+// 'none' = 고른 매매법을 다시 눌러 풀었다: 차트에 아무 매매법도 그리지 않는다
+const current = () => state.trading && state.candidate !== 'none' && (state.trading.candidates.find((c) => c.key === state.candidate)
   || state.trading.candidates.find((c) => c.key === state.trading.live));  // 처음에는 자동 주문이 따라가는 후보
 
 // 뉴욕 시각의 '시'(0 ~ 23)
@@ -850,7 +851,15 @@ function marker(time, from, to, long, pnl) {
 
 function renderMarkers() {
   const c = current();
-  if (!c || !state.bars.length) return;
+  if (!c) {  // 매매법을 풀었으면 화살표·추천 구간·가상 진입선을 지운다
+    series.setMarkers([]);
+    state.zones = [];
+    if (entryLine) series.removePriceLine(entryLine);
+    entryLine = null;
+    renderDrawings();
+    return;
+  }
+  if (!state.bars.length) return;
   const first = state.bars[0].time;
   let markers;
   if (state.interval === 'D') {
@@ -968,12 +977,16 @@ function renderSide() {
   const d = state.trading;
   if (!d) return;
   const c = current();
-  state.candidate = c.key;
+  if (c) state.candidate = c.key;
   $('picks').innerHTML = d.candidates.map((x) => {
-    const on = x.key === c.key;
+    const on = Boolean(c) && x.key === c.key;
     return `<button data-key="${x.key}" class="${on ? 'active' : ''}" aria-pressed="${on}">${x.name.split(' · ')[0]}${x.key === d.live ? ' ★' : ''}</button>`;
   }).join('');
-  renderWhy(c, d);
+  if (c) renderWhy(c, d);
+  else {
+    $('why-note').textContent = '';
+    $('why').innerHTML = '<p class="muted">차트에 표시할 매매법을 고르세요. 고른 것을 다시 누르면 풀립니다.</p>';
+  }
   renderLevels();
   renderMarkers();
 }
@@ -1161,8 +1174,8 @@ function renderSize() {
     + (capped ? ' <small>(최대 계약 수에서 멈춤)</small>' : '');
   document.querySelector('#trade-buttons .buy').textContent = `매수 ${n}계약`;
   document.querySelector('#trade-buttons .sell').textContent = `매도 ${n}계약`;
-  document.querySelector('#limit-open .buy').textContent = `지정가 매수 ${n}계약`;
-  document.querySelector('#limit-open .sell').textContent = `지정가 매도 ${n}계약`;
+  document.querySelector('#limit-open .buy').textContent = `매수 ${n}계약`;
+  document.querySelector('#limit-open .sell').textContent = `매도 ${n}계약`;
 }
 $('size').addEventListener('input', renderSize);
 
@@ -1416,7 +1429,7 @@ $('intervals').addEventListener('click', (ev) => {
 $('picks').addEventListener('click', (ev) => {
   const item = ev.target.closest('[data-key]');
   if (!item) return;
-  state.candidate = item.dataset.key;
+  state.candidate = item.dataset.key === state.candidate ? 'none' : item.dataset.key;  // 고른 것을 다시 누르면 풀기
   localStorage.setItem('mnqCandidate', state.candidate);
   renderSide();
   if (current() && current().mtf && !state.mtf) loadMtf();
