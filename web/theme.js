@@ -1,4 +1,4 @@
-// 밝게/어둡게 전환: 맨 위 줄에 전환 버튼을 달고, 페이지 스크립트가 만든 차트의 글자·격자 색을 테마에 맞춘다.
+// Light/Dark Mode 전환: 맨 위 줄에 전환 버튼을 달고, 페이지 스크립트가 만든 차트의 글자·격자 색을 테마에 맞춘다.
 
 (function () {
   const root = document.documentElement;
@@ -24,7 +24,7 @@
   function apply(theme) {
     root.dataset.theme = theme;
     localStorage.setItem('theme', theme);
-    button.textContent = theme === 'dark' ? '밝게' : '어둡게';
+    button.textContent = theme === 'dark' ? 'Light Mode' : 'Dark Mode';
     button.setAttribute('aria-label', theme === 'dark' ? '밝은 화면으로 바꾸기' : '어두운 화면으로 바꾸기');
     paintChart();
     // 자산 변화 페이지: 첫 번째 선이 흰색이라 밝은 화면에서 안 보이므로 글자 색으로 바꿔 다시 그린다

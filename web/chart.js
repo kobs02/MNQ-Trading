@@ -20,6 +20,7 @@ const partsText = (parts) => (parts && 'intraday' in parts ? Object.entries(part
 const position = (n) => (n > 0 ? `<span class="c-up">롱 ${n}계약</span>` : n < 0 ? `<span class="c-down">숏 ${-n}계약</span>` : '없음');
 const INTERVALS = { 1: '1분', 5: '5분', 15: '15분', 60: '1시간', D: '일봉' };
 const UP = token('--long'), DOWN = token('--short');
+const candleColors = () => { const up = token('--candle-up'), down = token('--candle-down'); return { upColor: up, downColor: down, wickUpColor: up, wickDownColor: down }; };
 // 차트 라이브러리는 UTC로 표시하므로 시각을 이 컴퓨터의 시간대만큼 밀어서 넣는다
 const TZ = -new Date().getTimezoneOffset() * 60;
 
@@ -62,7 +63,7 @@ const chart = LightweightCharts.createChart($('chart'), {
   localization: { locale: 'ko-KR' },
 });
 const series = chart.addCandlestickSeries({
-  upColor: UP, downColor: DOWN, wickUpColor: UP, wickDownColor: DOWN, borderVisible: false,
+  ...candleColors(), borderVisible: false,
   priceFormat: { type: 'custom', minMove: 0.25, formatter: fmtPrice },
 });
 let entryLine = null;
@@ -254,11 +255,11 @@ function renderDrawings() {
   const boxes = shown.filter((d) => d.type === 'box');
   const trends = shown.filter((d) => d.type === 'trend');
   if (draw.start && draw.hover) (draw.tool === 'trend' ? trends : boxes).push({ a: draw.start, b: draw.hover, preview: true });
-  const color = token('--accent');
+  const accent = token('--accent');
   $('draw').innerHTML = (draw.clean ? '' : renderCloud(chart.timeScale().width())) + renderZones() + boxes.map((d) => {
     const r = boxRect(d);
     if (!r) return '';
-    const on = d === draw.selected;
+    const on = d === draw.selected, color = d.color || accent;
     return `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="${color}" fill-opacity="${d.preview ? 0.03 : on ? 0.12 : 0.06}" stroke="${color}" stroke-width="${on ? 2 : 1}"${d.preview || on ? ' stroke-dasharray="4 3"' : ''}/>`
       + (on ? boxCorners(d).map((c) => (c.edge ? `<circle cx="${c.x}" cy="${c.y}" r="4"` : `<rect x="${c.x - 4}" y="${c.y - 4}" width="8" height="8"`)
         + ` fill="${token('--panel')}" stroke="${color}" stroke-width="2"/>`).join('') : '');
@@ -284,9 +285,15 @@ function renderMeasure() {
   if (!m || !now) return '';
   const x1 = timeX(m.a.time), x2 = timeX(m.b.time), y1 = series.priceToCoordinate(m.a.price), y2 = series.priceToCoordinate(m.b.price);
   if ([x1, x2, y1, y2].some((v) => v == null)) return '';
-  const diff = m.b.price - m.a.price, up = diff >= 0, color = up ? UP : DOWN;
-  const usd = Math.abs(diff) * (state.trading ? state.trading.multiplier : 2);
-  const label = `${up ? '▲ 롱' : '▼ 숏'} ${fmtSigned(Math.abs(diff) / now, 2).replace('+', up ? '+' : '-')} · ${up ? '+' : '-'}${Math.abs(diff).toFixed(2)}pt · 1계약 $${usd.toLocaleString('en-US')}`;
+  const diff = m.b.price - m.a.price, up = diff >= 0;
+  const move = `${fmtSigned(Math.abs(diff) / now, 2).replace('+', up ? '+' : '-')} · ${up ? '+' : '-'}${Math.abs(diff).toFixed(2)}pt`;
+  // 포지션을 들고 있으면 그 포지션의 손익(숏인데 위로 끌면 손실), 없으면 끈 방향으로 1계약 들었을 때
+  const p = account && account.view && account.view.find((x) => x.symbol === state.quote.symbol);
+  const pnl = (p ? p.qty : up ? 1 : -1) * diff * (state.trading ? state.trading.multiplier : 2);
+  const color = (p ? pnl >= 0 : up) ? UP : DOWN;  // 포지션이 있으면 이익 초록·손실 빨강, 없으면 예전처럼 위 초록·아래 빨강
+  const usd = `${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toLocaleString('en-US')}`;
+  const label = p ? `${up ? '▲' : '▼'} ${move} · 내 ${p.qty > 0 ? '롱' : '숏'} ${Math.abs(p.qty)}계약 ${pnl >= 0 ? '이익' : '손실'} ${usd}`
+    : `${up ? '▲ 롱' : '▼ 숏'} ${move} · 1계약 ${usd}`;
   const x = Math.min(x1, x2), w = Math.max(2, Math.abs(x2 - x1)), ty = up ? Math.min(y1, y2) - 8 : Math.max(y1, y2) + 18;
   return `<rect x="${x}" y="${Math.min(y1, y2)}" width="${w}" height="${Math.max(1, Math.abs(y2 - y1))}" fill="${color}" fill-opacity="0.15" stroke="${color}"/>`
     + `<line x1="${x2}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2"/>`
@@ -361,13 +368,14 @@ function hitTest(pt) {
 }
 function select(d) {
   draw.selected = d;
-  // 수평선을 고르면 도구 막대에 색 고르기가 나온다
-  $('hline-color').hidden = !(d && d.type === 'hline');
-  if (d && d.type === 'hline') $('hline-color').value = d.color || token('--draw');
+  // 수평선·박스를 고르면 도구 막대에 색 고르기가 나온다
+  const colorable = d && (d.type === 'hline' || d.type === 'box');
+  $('hline-color').hidden = !colorable;
+  if (colorable) $('hline-color').value = d.color || token(d.type === 'box' ? '--accent' : '--draw');
   renderDrawings();
 }
 $('hline-color').addEventListener('input', (e) => {
-  if (!draw.selected || draw.selected.type !== 'hline') return;
+  if (!draw.selected || (draw.selected.type !== 'hline' && draw.selected.type !== 'box')) return;
   draw.selected.color = e.target.value;
   keep('mnqDraw', draw.items);
   renderDrawings();
@@ -1084,15 +1092,16 @@ $('trade-buttons').addEventListener('click', async (e) => {
   if (!b) return;
   const flat = b.hasAttribute('data-flatten'), qty = Number(b.dataset.qty) * sizeContracts().n;
   const est = flat ? (account ? account.view : []).map(closeEstimate) : [];
-  if (b.hasAttribute('data-flip')) {  // 뒤집기: 계약 수는 서버가 주문 직전의 실제 포지션으로 정한다
+  if (b.hasAttribute('data-flip')) {  // 뒤집기: 지금 포지션을 닫고 고른 비중만큼 반대로(시장가 한 건). 닫을 몫은 서버가 주문 직전의 실제 포지션으로 정한다
     const p = account && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
     if (!p) return notice('뒤집을 포지션이 없습니다.');
-    const now = position(p.qty).replace(/<[^>]+>/g, ''), next = position(-p.qty).replace(/<[^>]+>/g, '');
-    if (!await ask(`${now} → ${next}: 시장가 ${p.qty > 0 ? '매도' : '매수'} ${2 * Math.abs(p.qty)}계약 한 건\n\n`
-      + `지금 포지션을 닫는 몫\n${closeEstimate(p).text}\n새 ${next.split(' ')[0]} 진입에 수수료 $${(CONTEST_FEE + BROKER_FEE) * Math.abs(p.qty)} 더\n\n`
+    const n = sizeContracts().n;
+    const now = position(p.qty).replace(/<[^>]+>/g, ''), next = position(-Math.sign(p.qty) * n).replace(/<[^>]+>/g, '');
+    if (!await ask(`${now} → ${next}: 시장가 ${p.qty > 0 ? '매도' : '매수'} ${Math.abs(p.qty) + n}계약 한 건\n\n`
+      + `지금 포지션을 닫는 몫\n${closeEstimate(p).text}\n새 ${next.split(' ')[0]} ${n}계약(고른 비중) 진입에 수수료 $${(CONTEST_FEE + BROKER_FEE) * n} 더\n\n`
       + '자동 주문은 꺼집니다(켜 두면 30초 뒤 목표 계약 수로 되돌리기 때문).', '포지션 뒤집기')) return;
     try {
-      await sending(b, () => post('/api/live/order', { flip: true }));
+      await sending(b, () => post('/api/live/order', { flip: true, qty: n }));
     } catch (err) {
       notice('주문하지 못했습니다: ' + err.message);
     }
@@ -1539,7 +1548,7 @@ $('advice-form').addEventListener('submit', (e) => {
   askAdvisor(q);
 });
 
-document.addEventListener('themechange', () => renderMarkers());
+document.addEventListener('themechange', () => { series.applyOptions(candleColors()); renderMarkers(); });
 renderTools();
 chooseInterval(state.interval);
 tickTrading();

@@ -13,10 +13,10 @@ function walk(orders, mult, fee) {
   return orders.map((o) => {
     const qty = o.exec_qty != null ? Math.sign(o.qty) * o.exec_qty : o.ok ? o.qty : 0;  // LS 체결 수량이 없으면 낸 수량이 다 체결됐다고 본다
     const px = o.exec_price || o.price;
-    let realized = null, ret = null;
+    let realized = null, ret = null, closed = 0;
     if (qty && px) {
       if (pos && Math.sign(qty) !== Math.sign(pos)) {
-        const closed = Math.min(Math.abs(qty), Math.abs(pos));
+        closed = Math.min(Math.abs(qty), Math.abs(pos));
         realized = closed * Math.sign(pos) * (px - avg) * mult;
         ret = Math.sign(pos) * (px - avg) / avg;  // 평균 진입가 대비(숏은 내리면 +)
         const left = pos + qty;
@@ -27,7 +27,7 @@ function walk(orders, mult, fee) {
         pos += qty;
       }
     }
-    return { ...o, filled: qty, px, realized, ret, fee: Math.abs(qty) * 2 * fee, pos };
+    return { ...o, filled: qty, px, realized, ret, closed, fee: Math.abs(qty) * 2 * fee, pos };
   });
 }
 
@@ -43,7 +43,7 @@ function renderRows() {
     return `<tr><td${r.order_time ? ` title="주문 낸 시각 ${fmtTime(r.order_time)}"` : ''}>${fmtTime(r.time)}</td><td>${r.kind}</td><td><b class="${tone(r.qty)}">${r.qty > 0 ? '매수' : '매도'} ${Math.abs(r.qty)}</b></td>`
       + `<td>${r.from != null ? `${side(r.from)} → ${side(r.to)}` : `→ ${side(r.pos)}`}</td><td>${fmtPrice(r.price)}</td><td>${r.exec_price ? fmtPrice(r.exec_price) : '-'}</td>`
       + `<td class="${slip > 0 ? 'c-down' : slip < 0 ? 'c-up' : ''}">${slip == null ? '-' : `${slip > 0 ? '+' : ''}${slip.toFixed(1)}틱`}</td>`
-      + `<td>${r.realized == null ? '-' : `<b class="${tone(r.realized)}">${fmtMoney(r.realized)}</b> <small class="${tone(r.realized)}">(${fmtSigned(r.ret, 2)})</small>`}</td><td>${r.filled ? fmtMoney(r.fee) : '-'}</td><td>${state}</td><td>${r.number || '-'}</td></tr>`;
+      + `<td>${r.realized == null ? '-' : `<b class="${tone(r.realized)}">${fmtMoney(r.realized)}</b> <small class="${tone(r.realized)}">(${fmtSigned(r.ret, 2)}${r.closed > 1 ? ` · ${r.closed}계약 ${fmtSigned(r.ret * r.closed, 2)}` : ''})</small>`}</td><td>${r.filled ? fmtMoney(r.fee) : '-'}</td><td>${state}</td><td>${r.number || '-'}</td></tr>`;
   }).join('') : '<tr><td colspan="11" class="empty">아직 주문이 없습니다.</td></tr>';
   $('pager').hidden = pages < 2;
   $('pager').innerHTML = `<button type="button" class="plain-button" data-go="-1"${page ? '' : ' disabled'}>← 최근</button>`
