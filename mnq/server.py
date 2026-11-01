@@ -28,11 +28,6 @@ def index():
     return redirect("/chart.html")
 
 
-@app.get("/api/paper")
-def api_paper():
-    return jsonify(paper.get_paper())
-
-
 @app.get("/api/chart")
 def api_chart():
     key = request.args.get("interval", "1")

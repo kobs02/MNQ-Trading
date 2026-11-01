@@ -1145,3 +1145,11 @@ aside .card + .card { border-top: 1px solid var(--border); }
 
 /* 10-27: 주문 기록 맨 위 네 칸이 카드 바탕과 거의 같은 색이라 경계가 안 보였다 → 테두리와 한 단 다른 바탕 */
 .order-stats > div { border: 1px solid var(--border-strong); background: color-mix(in srgb, var(--panel) 70%, var(--bg)); }
+
+/* 타임랩스 */
+.tl-speed { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); }
+.tl-speed select { padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; }
+.tl-seek { width: 100%; margin-top: 10px; accent-color: var(--accent); }
+.tl-table tbody tr[data-i] { cursor: pointer; }
+.tl-table tbody tr[data-i]:hover, .tl-table tbody tr.picked { background: var(--sunken); }
+#hud { margin-bottom: 12px; }

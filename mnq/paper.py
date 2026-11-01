@@ -290,31 +290,6 @@ def _backtests():
     return _cache
 
 
-def get_paper():
-    """모의 운용 페이지용 데이터."""
-    bt = _backtests()
-    with _lock:
-        states = json.loads(json.dumps(_load()))
-    price = status["price"]
-    out = []
-    for key, cand in config.CANDIDATES.items():
-        acct = states.get(key)
-        item = {"key": key, "name": cand["name"], "note": cand["note"], "lever": cand["lever"], "intraday": "intraday" in cand, "backtest": bt["backtests"][key],
-                "signal": {"expo": bt["signal"][key], "contracts": _contracts(bt["signal"][key], acct["equity"] if acct else config.CAPITAL, price) if price else None}}
-        if acct:
-            values = [config.CAPITAL] + [v for _, v in acct["marks"]]
-            peak, mdd = values[0], 0.0
-            for v in values:
-                peak = max(peak, v)
-                mdd = min(mdd, v / peak - 1)
-            item.update(started=acct["started"], equity=acct["equity"], contracts=acct["contracts"], drawdown=mdd, parts=acct.get("parts"),
-                        curve=acct["marks"], trades=acct["trades"][::-1][:100], decided=acct["decided"])
-        out.append(item)
-    return {"candidates": out, "capital": config.CAPITAL, "fee": config.FEE_PER_CONTRACT, "multiplier": config.MULTIPLIER,
-            "symbol": status["symbol"], "price": price, "price_at": status["price_at"], "error": status["error"],
-            "close": bt["close"], "next_decision": _next_decision()}
-
-
 def get_trading():
     """실시간 차트 페이지용: 후보마다 계좌와 포지션, 매매 기록만(과거 시험 곡선은 빼서 가볍게)."""
     bt = _backtests()

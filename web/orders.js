@@ -7,30 +7,6 @@ const tone = (v) => (v > 0 ? 'c-up' : v < 0 ? 'c-down' : '');
 const side = (n) => (n > 0 ? `롱 ${n}` : n < 0 ? `숏 ${-n}` : '0');
 const fmtTime = (sec) => new Date(sec * 1000).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-// 체결마다: 같은 방향이면 평균 진입가를 옮기고, 반대 방향이면 닫은 몫의 손익을 낸다(넘치면 반대로 새로 연다)
-function walk(orders, mult, fee) {
-  let pos = 0, avg = 0;
-  return orders.map((o) => {
-    const qty = o.exec_qty != null ? Math.sign(o.qty) * o.exec_qty : o.ok ? o.qty : 0;  // LS 체결 수량이 없으면 낸 수량이 다 체결됐다고 본다
-    const px = o.exec_price || o.price;
-    let realized = null, ret = null, closed = 0;
-    if (qty && px) {
-      if (pos && Math.sign(qty) !== Math.sign(pos)) {
-        closed = Math.min(Math.abs(qty), Math.abs(pos));
-        realized = closed * Math.sign(pos) * (px - avg) * mult;
-        ret = Math.sign(pos) * (px - avg) / avg;  // 평균 진입가 대비(숏은 내리면 +)
-        const left = pos + qty;
-        avg = Math.sign(left) === Math.sign(pos) || !left ? avg : px;  // 뒤집혔으면 넘친 몫은 체결가에 새로 연다
-        pos = left;
-      } else {
-        avg = (avg * Math.abs(pos) + px * Math.abs(qty)) / (Math.abs(pos) + Math.abs(qty));
-        pos += qty;
-      }
-    }
-    return { ...o, filled: qty, px, realized, ret, closed, fee: Math.abs(qty) * 2 * fee, pos };
-  });
-}
-
 // 체결 표: 최근 것부터 PAGE건씩 쪽으로 나눈다. 15초마다 새로 받아도 보던 쪽은 그대로
 const PAGE = 10;
 let table = [], page = 0;

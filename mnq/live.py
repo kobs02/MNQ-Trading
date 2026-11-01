@@ -136,7 +136,14 @@ def flatten():
             for o in rows:  # 지정가가 남아 있으면 닫은 뒤에 체결돼 반대 포지션이 생길 수 있다
                 ls.cancel(symbol, o["OvrsFutsOrdNo"])
                 log.warning("LS 모의계좌: 정리 전에 미체결 주문 %s를 취소했습니다", o["OvrsFutsOrdNo"])
-            if rows:  # 취소 전에 체결됐을 수 있으니 취소한 경우에만 다시 읽는다
+            old = [o for part in _old["rows"].values() for o in part]
+            for o in old:  # 이미 끝난 주문이면 취소가 거절될 수 있다: 그래도 포지션은 닫는다
+                try:
+                    ls.cancel(symbol, o["OvrsFutsOrdNo"], o["OrdDt"])
+                    log.warning("LS 모의계좌: 정리 전에 지난 거래일(%s) 미체결 주문 %s를 취소했습니다", o["OrdDt"], o["OvrsFutsOrdNo"])
+                except Exception as e:
+                    log.error("LS 모의계좌: 지난 거래일(%s) 미체결 주문 %s를 취소하지 못했습니다: %s", o["OrdDt"], o["OvrsFutsOrdNo"], e)
+            if rows or old:  # 취소 전에 체결됐을 수 있으니 취소한 경우에만 다시 읽는다
                 _pending(symbol)
                 actual = int(ls.positions()[0].get(symbol, 0))
             if actual:
@@ -235,6 +242,23 @@ def _open_rows(symbol):
     return [o for o in ls.orders(symbol, unfilled=_unfilled_ok()) if int(o.get("UnercQty") or 0) > 0]
 
 
+# 주문내역은 거래일별이라 거래일이 넘어가면 남은 지정가가 지금 거래일 조회에서 빠진다(11-02: 10-30의 8313이 화면에서 사라졌다).
+# 유효기간이 끝나도 LS에 미체결로 남는지 몰라, 보여 주고 취소만 할 수 있게 하고 자동 주문·새 주문은 막지 않는다
+OLD_DAYS = 5
+_old = {"today": None, "rows": {}}  # 거래일 → 미체결 행
+
+
+def _refresh_old(symbol):
+    """지난 거래일의 미체결: 거래일이 바뀌면 최근 OLD_DAYS일을 훑고, 그 뒤로는 남아 있는 날만 다시 묻는다(LS 조회를 아끼려고)."""
+    today = ls.order_day()
+    days = set(_old["rows"])
+    if _old["today"] != today:
+        base = datetime.strptime(today, "%Y%m%d")
+        days |= {(base - timedelta(days=i)).strftime("%Y%m%d") for i in range(1, OLD_DAYS + 1)}
+    rows = {day: [o for o in ls.orders(symbol, day=day, unfilled=_unfilled_ok()) if int(o.get("UnercQty") or 0) > 0] for day in days - {today}}
+    _old.update(today=today, rows={day: r for day, r in rows.items() if r})
+
+
 def _verify_unfilled(symbol, now):
     """미체결만 묻기를 전체 내역과 맞춰 본다: 확인 전에는 30초 확인마다, 확인 뒤엔 10분마다(주문 잠금 밖에서, 주문을 막지 않게).
     전체 내역의 미체결이 미체결만 묻기(앞·뒤 두 번)에 다 있으면 믿고, 하나라도 빠지면 다시 전체 내역으로 돌아간다."""
@@ -272,8 +296,13 @@ def _hold_pending(number, entry=None):
 def _pending(symbol):
     """미체결 주문(LS 주문내역에서 UnercQty > 0)을 읽고 화면용으로 status["pending"]에 줄여 둔다(_hold를 덧씌워서). LS 행을 그대로 돌려준다."""
     rows = _open_rows(symbol)
-    shown = {o.get("OvrsFutsOrdNo"): {"number": o.get("OvrsFutsOrdNo"), "qty": (1 if o.get("BnsTpCode") == "2" else -1) * int(o["UnercQty"]),
-                                      "price": float(o.get("OvrsDrvtOrdPrc") or 0), "limit": o.get("AbrdFutsOrdPtnCode") == "2"} for o in rows}
+    view = lambda o, number: {"number": number, "qty": (1 if o.get("BnsTpCode") == "2" else -1) * int(o["UnercQty"]),
+                              "price": float(o.get("OvrsDrvtOrdPrc") or 0), "limit": o.get("AbrdFutsOrdPtnCode") == "2"}
+    shown = {o.get("OvrsFutsOrdNo"): view(o, o.get("OvrsFutsOrdNo")) for o in rows}
+    for day, old in _old["rows"].items():
+        for o in old:
+            number = f"{day}-{o['OvrsFutsOrdNo']}"  # 번호는 거래일마다 새로 매겨져 겹칠 수 있다
+            shown[number] = {**view(o, number), "day": day}
     now = time.time()
     for number, (until, entry) in list(_hold.items()):
         if now > until:
@@ -357,6 +386,8 @@ def _check_price(price):
 
 def modify_limit(number, price):
     """화면에서 지정가 선을 끌어 옮기면: 그 미체결 지정가 주문의 가격을 정정한다. 정정되면 주문번호가 바뀌므로 기록도 새 번호로 고친다."""
+    if "-" in number:
+        raise ValueError("지난 거래일 주문은 정정할 수 없습니다(취소만 됩니다)")
     symbol = _check_price(price)
     with _button():
         row = next((o for o in _open_rows(symbol) if o.get("OvrsFutsOrdNo") == number), None)
@@ -399,8 +430,11 @@ def cancel_pending(number=None):
         done, errors = 0, []
         for n in numbers:
             try:
-                ls.cancel(symbol, n)
+                day, _, no = n.rpartition("-")  # 지난 거래일 주문은 '거래일-번호'
+                ls.cancel(symbol, no, day or None)
                 _hold_pending(n)
+                if day:
+                    _old["rows"][day] = [o for o in _old["rows"].get(day, []) if o["OvrsFutsOrdNo"] != no]
                 done += 1
                 log.warning("LS 모의계좌: 미체결 주문 %s를 취소했습니다", n)
             except Exception as e:  # 그 사이 체결된 주문 등: 나머지는 계속 취소한다
@@ -428,8 +462,9 @@ def tick():
     if paper.status["symbol"]:
         try:
             _verify_unfilled(paper.status["symbol"], time.time())
+            _refresh_old(paper.status["symbol"])
         except Exception as e:
-            log.warning("LS 미체결만 묻기 점검 실패: %s", e)
+            log.warning("LS 미체결 점검 실패: %s", e)
     symbol = paper.status["symbol"]
     if not symbol:
         return
@@ -674,6 +709,7 @@ if __name__ == "__main__":
     PATH = Path(tempfile.mkdtemp()) / "live.json"
     UNFILLED = PATH.with_name("ls_unfilled.json")
     _state = None
+    _old["today"] = ls.order_day()  # 가짜 LS는 날짜를 안 가려서 처음 훑기를 건너뛴다
     sent, book = [], {"pos": 0, "pending": []}
     ls.positions = lambda: ({"MNQZ26": book["pos"]}, [])
     ls.orders = lambda symbol, **k: book["pending"]
@@ -744,7 +780,7 @@ if __name__ == "__main__":
     # 지정가 정리: 롱 2 → 매도 2 지정가, 자동 주문은 끔. 미체결이면 다시 못 내고, 취소하면 비운다
     limits, cancels = [], []
     ls.limit_order = lambda symbol, qty, price: limits.append((qty, price)) or "0000000002"
-    ls.cancel = lambda symbol, number: cancels.append(number) or "0000000003"
+    ls.cancel = lambda symbol, number, day=None: cancels.append((number, day) if day else number) or "0000000003"
     book["pos"], _state["enabled"] = 2, True
     limit_close(30010.25)
     assert limits == [(-2, 30010.25)] and not _state["enabled"] and _state["orders"][-1]["limit"], limits
@@ -802,6 +838,36 @@ if __name__ == "__main__":
     ls.orders = lambda symbol, **k: [] if cancels else book["pending"]  # 취소하면 미체결이 사라진다
     assert cancel_pending() == 1 and cancels == ["0000000002"] and status["pending"] == []
     _hold.clear()
+    # 지난 거래일 미체결: 보이고, 그 거래일로 취소되고, 정정은 거절. 주문을 막지 않고, 취소가 거절돼도 정리는 나간다
+    old_row = {"UnercQty": 20, "OvrsFutsOrdNo": "0000008313", "OrdDt": "20261030", "BnsTpCode": "2", "OvrsDrvtOrdPrc": "28062.5", "AbrdFutsOrdPtnCode": "2"}
+    orders, cancels[:] = ls.orders, []
+    ls.orders = lambda symbol, day=None, **k: [old_row] if day == "20261030" else []
+    day_was, ls.order_day = ls.order_day, lambda now=None: "20261102"
+    _old.update(today=None, rows={})
+    _refresh_old("MNQZ26")
+    ls.order_day = day_was
+    _pending("MNQZ26")
+    assert status["pending"] == [{"number": "20261030-0000008313", "qty": 20, "price": 28062.5, "limit": True, "day": "20261030"}], status["pending"]
+    assert _read("MNQZ26")[0] == []               # 자동 주문·새 지정가를 막는 쪽에는 안 들어간다
+    try:
+        modify_limit("20261030-0000008313", 30020.0)
+        raise AssertionError("지난 거래일 주문 정정")
+    except ValueError:
+        pass
+    assert cancel_pending("20261030-0000008313") == 1 and cancels == [("0000008313", "20261030")] and status["pending"] == [], cancels
+    _hold.clear()
+    _old["rows"] = {"20261030": [old_row]}
+    n, cancel, market_open_, book["pos"] = len(sent), ls.cancel, market_open, 1
+    def refuse(*a):
+        raise ls.LSError("이미 끝난 주문")
+    ls.cancel, market_open = refuse, lambda ny: True
+    flatten()
+    assert sent[n:] == [-1], sent[n:]
+    ls.cancel, market_open, ls.orders = cancel, market_open_, orders
+    _old["rows"], book["pos"], cancels[:] = {}, 0, ["0000000002"]
+    _hold.clear()
+    _last_order[0] = 0
+    _state["enabled"] = False
     ls.orders = lambda symbol, **k: book["pending"]
     _hold_pending("0000000007", {"number": "0000000007", "qty": 1, "price": 30000.0, "limit": True})
     _hold_pending("0000000002")

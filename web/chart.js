@@ -569,7 +569,7 @@ function fillPnl(o, price) {
   const net = n * Math.sign(p.qty) * (price - p.entry) * (state.trading ? state.trading.multiplier : 2) - n * 2 * (CONTEST_FEE + BROKER_FEE);
   return ` · 체결되면 ${net >= 0 ? '+' : ''}${fmtMoney(net)} (계좌 ${fmtSigned(net / account.capital, 3)})`;
 }
-const orderTitle = (o) => `지정가 ${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}${fillPnl(o, o.price)} · 끌어서 정정`;
+const orderTitle = (o) => `지정가 ${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}${fillPnl(o, o.price)} · ${o.day ? `${o.day.slice(4, 6)}-${o.day.slice(6)} 주문` : '끌어서 정정'}`;
 function renderOrderLines(pending) {
   const want = new Map((pending || []).filter((o) => o.limit).map((o) => [o.number, o]));
   orderLines.forEach((v, n) => { if (!want.has(n)) { series.removePriceLine(v.line); orderLines.delete(n); } });
@@ -1096,7 +1096,7 @@ function renderLive(d) {
     ['이번 주 체결', d.week == null ? '-' : `<b class="${d.week >= d.min_weekly ? 'c-up' : ''}">${d.week}</b> / ${d.min_weekly}건 <small>(모자라면 금요일 뉴욕 14시부터 채움)</small>`],
     ['상태', d.error ? `<span class="c-down">${d.error}</span>` : d.note || '-'],
   ].concat((d.pending || []).length ? [['미체결', d.pending.map((o) => `<b class="${tone(o.qty)}">${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}</b>`
-    + (o.limit ? ` @ ${fmtPrice(o.price)}` : ' 시장가')).join('<br>') + '<button class="pending-cancel" data-cancel>취소</button>']] : [])) + (orders ? `<table class="trend-table"><tbody>${orders}</tbody></table>` : '<p class="empty">아직 주문이 없습니다.</p>');
+    + (o.limit ? ` @ ${fmtPrice(o.price)}` : ' 시장가') + (o.day ? ` <small>(${o.day.slice(4, 6)}-${o.day.slice(6)} 주문)</small>` : '')).join('<br>') + '<button class="pending-cancel" data-cancel>취소</button>']] : [])) + (orders ? `<table class="trend-table"><tbody>${orders}</tbody></table>` : '<p class="empty">아직 주문이 없습니다.</p>');
 }
 
 // 직접 주문: 시장가로 바로 나가고 자동 주문은 꺼진다(켜 두면 30초 뒤 목표 계약 수로 되돌리기 때문)

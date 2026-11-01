@@ -44,7 +44,7 @@ LEVELS = {
 }
 # 로거 이름 → 분류. 요청 기록과 서버 시작은 내용을 보고 따로 나눈다
 TAGS = {"mnq.paper": "모의운용", "mnq.chart": "차트", "mnq.ls": "LS", "mnq.tray": "아이콘", "__main__": "서버"}
-QUIET = ("/api/chart", "/api/trading", "/api/paper")  # 화면이 주기적으로 묻는 주소
+QUIET = ("/api/chart", "/api/trading")  # 화면이 주기적으로 묻는 주소
 TAG_WIDTH = 8  # 화면 칸 수(한글은 두 칸)
 BAR = "▌"
 
@@ -224,7 +224,7 @@ def success(logger, message, *args):
 if __name__ == "__main__":
     # 점검: 요청 기록 해석, 조용히 둘 요청, 칸 맞춤, 시간 형식
     assert _request('127.0.0.1 - - [14/Oct/2026 23:40:01] "GET /api/chart?interval=5 HTTP/1.1" 200 -') == (logging.INFO, "GET /api/chart?interval=5  200  · 127.0.0.1")
-    assert _request('1.2.3.4 - - [x] "GET /api/paper HTTP/1.1" 500 -')[0] == logging.ERROR
+    assert _request('1.2.3.4 - - [x] "GET /api/trading HTTP/1.1" 500 -')[0] == logging.ERROR
     assert _request("가상 매매") is None
     rec = lambda msg: logging.LogRecord("werkzeug", logging.INFO, "", 0, msg, None, None)
     assert not _quiet(rec('127.0.0.1 - - [x] "GET /api/chart?interval=5 HTTP/1.1" 200 -'))

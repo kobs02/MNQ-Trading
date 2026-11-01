@@ -83,8 +83,9 @@ def call(tr, body, cont_key=None, _retried=False, _busy=0):
         data = resp.json()
     except ValueError:
         raise LSError(f"{tr}: 응답을 읽지 못했습니다({resp.status_code}): {resp.text[:300]}")
-    # 토큰이 만료됐거나 취소됐다. IGW00121(유효하지 않은 token)은 401/403이 아닌 코드로도 온다
-    if (resp.status_code in (401, 403) or data.get("rsp_cd") == "IGW00121") and not _retried:
+    # 토큰이 만료됐거나 취소됐다. IGW00121(유효하지 않은 token)·IGW00123(만료된 token)은 401/403이 아닌 코드로도 온다
+    # 11-02 확인: 06:29에 받아 23시간 넘게 남은 토큰이 07:03에 IGW00123(HTTP 500)이었다. expires_in만 믿으면 안 된다
+    if (resp.status_code in (401, 403) or data.get("rsp_cd") in ("IGW00121", "IGW00123")) and not _retried:
         token(fresh=True)
         return call(tr, body, cont_key, _retried=True, _busy=_busy)
     # 초당 한도는 앱키마다 세므로 다른 프로그램(서버와 연구 스크립트)이 같은 TR을 부르면 넘을 수 있다. 1초 쉬고 다시 보낸다.
@@ -218,10 +219,10 @@ def limit_order(symbol, qty, price):
     return _new_order(symbol, qty, price)
 
 
-def cancel(symbol, number):
-    """미체결 주문 취소(CIDBT01000). 취소 주문의 번호를 돌려준다."""
+def cancel(symbol, number, day=None):
+    """미체결 주문 취소(CIDBT01000). day는 그 주문의 거래일(기본 지금 거래일). 취소 주문의 번호를 돌려준다."""
     data, _ = call("CIDBT01000", {"CIDBT01000InBlock1": {
-        "RecCnt": 1, "OrdDt": order_day(), "BrnNo": " ", "IsuCodeVal": symbol, "OvrsFutsOrgOrdNo": number,
+        "RecCnt": 1, "OrdDt": day or order_day(), "BrnNo": " ", "IsuCodeVal": symbol, "OvrsFutsOrgOrdNo": number,
         "FutsOrdTpCode": "3", "PrdtTpCode": " ", "ExchCode": " "}})  # 3 취소
     done = (data.get("CIDBT01000OutBlock2") or {}).get("OvrsFutsOrdNo")
     if not done or not done.strip("0"):
