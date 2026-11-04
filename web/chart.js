@@ -180,24 +180,24 @@ let levelsKey = null;
 function renderLevels() {
   const c = current();
   // 0.5초마다 불리므로 후보·봉 단위·봉 개수·경계·시가 바뀔 때만 다시 그린다
-  const key = c && [state.interval, c.key, state.bars.length, JSON.stringify(c.noise), nyHour(), (state.dailyCloses || []).length].join('|');
+  const ma = draw.studies.ma200 || (c && c.rule !== 'flat');  // 도구 막대의 '200일선'은 매매법과 상관없이 켠다
+  const key = [state.interval, c && c.key, ma, state.bars.length, c && JSON.stringify(c.noise), nyHour(), (state.dailyCloses || []).length].join('|');
   if (key === levelsKey) return;
   levelsKey = key;
-  const daily = state.interval === 'D' && c;
+  const daily = state.interval === 'D';
   const closes = state.bars.map((b) => b.close);
   const roll = (n, f) => state.bars.slice(n - 1).map((b, i) => ({ time: b.time + TZ, value: f(closes.slice(i, i + n)) }));
-  smaSeries.setData(daily && c.rule !== 'flat' ? roll(200, (w) => w.reduce((a, v) => a + v, 0) / w.length) : []);
-  lowSeries.setData(daily && c.rule === 'dip_trend' ? roll(5, (w) => Math.min(...w)) : []);
+  smaSeries.setData(daily && ma ? roll(200, (w) => w.reduce((a, v) => a + v, 0) / w.length) : []);
+  lowSeries.setData(daily && c && c.rule === 'dip_trend' ? roll(5, (w) => Math.min(...w)) : []);
   levelLines.forEach((l) => series.removePriceLine(l));
   levelLines = [];
-  if (!c || state.interval === 'D') return;
+  if (daily) return;
   const line = (price, color, title) => levelLines.push(series.createPriceLine({ price, color, title, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true }));
   // 분봉: 일봉 지표의 지금 값(일봉 화면의 두 선의 마지막 값)을 가로선으로. 화면의 가격 범위 밖이면 보이지 않는다
   const dc = state.dailyCloses;
-  if (dc && dc.length >= 200 && c.rule !== 'flat') {
-    line(dc.slice(-200).reduce((a, v) => a + v, 0) / 200, token('--accent'), '200일선');
-    if (c.rule === 'dip_trend') line(Math.min(...dc.slice(-5)), token('--text-3'), '5일 최저 종가');
-  }
+  if (dc && dc.length >= 200 && ma) line(dc.slice(-200).reduce((a, v) => a + v, 0) / 200, token('--accent'), '200일선');
+  if (!c) return;
+  if (dc && dc.length >= 5 && c.rule === 'dip_trend') line(Math.min(...dc.slice(-5)), token('--text-3'), '5일 최저 종가');
   const n = c.noise;
   if (!n || !n.today) return;
   const hour = Math.min(15, Math.max(10, nyHour() + 1));
@@ -453,6 +453,7 @@ $('tools').addEventListener('click', async (e) => {
     keep('mnqStudies', draw.studies);
     renderTools();
     renderStudies();
+    renderLevels();
     renderDrawings();
   } else if (b.dataset.tool === 'clear') {
     // 고른 것이 있으면 그것만, 없으면 한 번 묻고 모두
