@@ -13,7 +13,7 @@ from . import config, ls, paper, strategies, stream
 
 log = logging.getLogger(__name__)
 
-INTERVALS = {"1": 1, "5": 5, "15": 15, "60": 60, "D": None}  # 화면의 봉 단위 → 분. D: 일봉(야후 NQ=F, 2021 ~)
+INTERVALS = {"1": 1, "5": 5, "15": 15, "60": 60, "D": None, "W": None}  # 화면의 봉 단위 → 분. D: 일봉(야후 NQ=F, 2021 ~), W: 그 일봉을 묶은 주봉
 DAILY_FROM = "2021-01-01"
 FIRST = 1000     # 처음에 받는 봉 수. 화면을 왼쪽 끝까지 끌면 OLDER개씩 더 과거를 받는다
 OLDER = 1000
@@ -87,10 +87,23 @@ def daily():
     return out
 
 
+def weekly(days):
+    """일봉을 월요일에 시작하는 주봉으로 묶는다. 시각은 그 주 월요일 0시(UTC)."""
+    out = []
+    for b in days:
+        week = b["time"] - (b["time"] // 86400 + 3) % 7 * 86400  # 1970-01-01이 목요일
+        if out and out[-1]["time"] == week:
+            w = out[-1]
+            w.update(high=max(w["high"], b["high"]), low=min(w["low"], b["low"]), close=b["close"], volume=w["volume"] + b["volume"])
+        else:
+            out.append({**b, "time": week})
+    return out
+
+
 def bars(key, since=None):
     """그 봉 단위의 봉들(오래된 것부터). since를 주면 그 시각 이후의 봉만."""
-    if key == "D":
-        return [b for b in daily() if since is None or b["time"] >= since]
+    if key in ("D", "W"):
+        return [b for b in (daily() if key == "D" else weekly(daily())) if since is None or b["time"] >= since]
     minutes = INTERVALS[key]
     stale = lambda: minutes not in _bars or time.time() - _at[minutes] > (RESYNC if _live() else FALLBACK)
     if stale():
@@ -113,7 +126,7 @@ def bars(key, since=None):
 def older(key):
     """화면을 왼쪽 끝까지 끌었을 때: 받아 둔 것보다 오래된 봉 OLDER개(오래된 것부터)와, LS에 더 남았는지."""
     minutes = INTERVALS[key]
-    if key == "D" or minutes not in _bars:
+    if minutes is None or minutes not in _bars:
         return {"bars": [], "done": True}
     with _fetching:
         cont = _cont.get(minutes)

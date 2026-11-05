@@ -18,7 +18,9 @@ const tone = (v) => (v > 0 ? 'c-up' : v < 0 ? 'c-down' : '');
 const SLEEVES = { daily: '일봉', intraday: '장중' };
 const partsText = (parts) => (parts && 'intraday' in parts ? Object.entries(parts).map(([k, n]) => `${SLEEVES[k]} ${n > 0 ? '롱' : n < 0 ? '숏' : ''}${n ? ' ' + Math.abs(n) : '없음'}`).join(' · ') : '');
 const position = (n) => (n > 0 ? `<span class="c-up">롱 ${n}계약</span>` : n < 0 ? `<span class="c-down">숏 ${-n}계약</span>` : '없음');
-const INTERVALS = { 1: '1분', 5: '5분', 15: '15분', 60: '1시간', D: '일봉' };
+const INTERVALS = { 1: '1분', 5: '5분', 15: '15분', 60: '1시간', D: '일봉', W: '주봉' };
+const dayBars = () => state.interval === 'D' || state.interval === 'W';  // 일봉·주봉: 야후 NQ=F, 시각은 날짜(0시 UTC)
+const weekStart = (t) => t - ((Math.floor(t / 86400) + 3) % 7) * 86400;  // 그 주 월요일 0시(1970-01-01이 목요일)
 const UP = token('--long'), DOWN = token('--short');
 const candleColors = () => { const up = token('--candle-up'), down = token('--candle-down'); return { upColor: up, downColor: down, wickUpColor: up, wickDownColor: down }; };
 // 차트 라이브러리는 UTC로 표시하므로 시각을 이 컴퓨터의 시간대만큼 밀어서 넣는다
@@ -55,23 +57,24 @@ async function post(path, data) {
 
 const chart = LightweightCharts.createChart($('chart'), {
   autoSize: true,
-  layout: { background: { color: 'transparent' }, textColor: token('--text-2'), fontFamily: 'inherit', fontSize: 13 },
+  layout: { background: { color: 'transparent' }, textColor: token('--text-2'), fontFamily: 'inherit', fontSize: 13, panes: { separatorColor: token('--border') } },
   grid: { vertLines: { color: token('--grid') }, horzLines: { color: token('--grid') } },
   rightPriceScale: { borderColor: token('--border') },
   timeScale: { borderColor: token('--border'), timeVisible: true, secondsVisible: false, rightOffset: 8 },
   crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   localization: { locale: 'ko-KR' },
 });
-const series = chart.addCandlestickSeries({
+const series = chart.addSeries(LightweightCharts.CandlestickSeries, {
   ...candleColors(), borderVisible: false,
   priceFormat: { type: 'custom', minMove: 0.25, formatter: fmtPrice },
 });
+const seriesMarkers = LightweightCharts.createSeriesMarkers(series, []);
 let entryLine = null;
 // 규칙이 보는 값(지표): 일봉의 선 두 개와 분봉의 가로선들
 const lineOpts = (color, title) => ({ color, title, lineWidth: 1, priceLineVisible: false, crosshairMarkerVisible: false, lastValueVisible: true,
   priceFormat: { type: 'custom', minMove: 0.25, formatter: fmtPrice } });
-const smaSeries = chart.addLineSeries(lineOpts(token('--accent'), '200일선'));
-const lowSeries = chart.addLineSeries({ ...lineOpts(token('--text-3'), '5일 최저 종가'), lineStyle: LightweightCharts.LineStyle.Dotted,
+const smaSeries = chart.addSeries(LightweightCharts.LineSeries, lineOpts(token('--accent'), '200일선'));
+const lowSeries = chart.addSeries(LightweightCharts.LineSeries, { ...lineOpts(token('--text-3'), '5일 최저 종가'), lineStyle: LightweightCharts.LineStyle.Dotted,
   lineType: LightweightCharts.LineType.WithSteps });
 let levelLines = [];
 
@@ -81,7 +84,7 @@ const shifted = (b) => ({ ...b, time: b.time + TZ });
 // 미래 칸: 마지막 봉 뒤로 빈 봉(시각만 있는 점)을 FUTURE개 놓아 시간 축 글자와 세로 격자가 미래에도 보이게 한다.
 // 값이 없는 보이지 않는 계열에 두어 캔들 계열의 update(실시간 봉)는 그대로 쓴다. 일봉은 평일만, 분봉은 봉 간격대로(CME 쉬는 시간도 그냥 이어서)
 const FUTURE = 300;
-const futureSeries = chart.addLineSeries({ color: 'transparent', priceScaleId: 'future', priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+const futureSeries = chart.addSeries(LightweightCharts.LineSeries, { color: 'transparent', priceScaleId: 'future', priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
 function renderFuture(fresh) {
   const bars = state.bars;
   if (!bars.length) { futureSeries.setData([]); state.future = []; return; }
@@ -129,7 +132,7 @@ async function loadBars(fresh) {
 
 // 화면을 왼쪽 끝 가까이까지 끌면 그 이전 봉을 받아 앞에 붙인다. 보고 있던 자리는 그대로 둔다
 async function loadOlder() {
-  if (state.loadingOlder || state.noOlder || state.interval === 'D' || !state.bars.length) return;
+  if (state.loadingOlder || state.noOlder || dayBars() || !state.bars.length) return;
   state.loadingOlder = true;
   const gen = state.generation;
   try {
@@ -156,7 +159,7 @@ let legendHover = false;
 function renderLegend(b) {
   if (!b) { $('legend').innerHTML = ''; return; }
   const change = (b.close - b.open) / b.open;
-  const day = state.interval === 'D' ? `${new Date(b.time * 1000).toISOString().slice(0, 10)} · ` : '';
+  const day = dayBars() ? `${new Date(b.time * 1000).toISOString().slice(0, 10)} · ` : '';
   $('legend').innerHTML = `<b>${INTERVALS[state.interval]}</b>${day}시 ${fmtPrice(b.open)} · 고 ${fmtPrice(b.high)} · 저 ${fmtPrice(b.low)} · 종 ${fmtPrice(b.close)}
     <span class="${tone(change)}">${fmtSigned(change, 2)}</span> · 거래량 ${b.volume.toLocaleString('en-US')}`;
 }
@@ -199,7 +202,7 @@ function renderLevels() {
   if (!c) return;
   if (dc && dc.length >= 5 && c.rule === 'dip_trend') line(Math.min(...dc.slice(-5)), token('--text-3'), '5일 최저 종가');
   const n = c.noise;
-  if (!n || !n.today) return;
+  if (!n || !n.today || state.interval === 'W') return;  // 주봉에는 장중 경계를 그리지 않는다
   const hour = Math.min(15, Math.max(10, nyHour() + 1));
   const band = n.bands[hour];
   line(n.open, token('--text-3'), '9시 시가');
@@ -217,7 +220,7 @@ const draw = { tool: null, start: null, hover: null, mouse: null, ichi: null, se
 const hlines = new Map();  // 수평선 항목 → 가격선 객체
 
 // 시각 → 지금 봉 단위에서 그 시각이 들어가는 봉의 x 좌표(봉 사이 시각도 그 봉으로). 마지막 봉 뒤(미래)는 봉 간격으로 늘려 잡는다
-const barStep = () => (state.interval === 'D' ? 86400 : state.interval * 60);
+const barStep = () => (state.interval === 'W' ? 7 * 86400 : state.interval === 'D' ? 86400 : state.interval * 60);
 function timeX(t) {
   const bars = state.bars;
   if (!bars.length) return null;
@@ -257,7 +260,8 @@ function renderDrawings() {
   const trends = shown.filter((d) => d.type === 'trend');
   if (draw.start && draw.hover) (draw.tool === 'trend' ? trends : boxes).push({ a: draw.start, b: draw.hover, preview: true });
   const accent = token('--accent');
-  $('draw').innerHTML = (draw.clean ? '' : renderCloud(chart.timeScale().width())) + renderZones() + boxes.map((d) => {
+  $('draw').style.height = chart.panes()[0].getHeight() + 'px';  // 그리기 층은 본 차트 칸까지만(지표 칸을 덮지 않게)
+  $('draw').innerHTML =(draw.clean ? '' : renderCloud(chart.timeScale().width())) + renderZones() + boxes.map((d) => {
     const r = boxRect(d);
     if (!r) return '';
     const on = d === draw.selected, color = d.color || accent;
@@ -570,7 +574,7 @@ function fillPnl(o, price) {
   const net = n * Math.sign(p.qty) * (price - p.entry) * (state.trading ? state.trading.multiplier : 2) - n * 2 * (CONTEST_FEE + BROKER_FEE);
   return ` · 체결되면 ${net >= 0 ? '+' : ''}${fmtMoney(net)} (계좌 ${fmtSigned(net / account.capital, 3)})`;
 }
-const orderTitle = (o) => `지정가 ${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}${fillPnl(o, o.price)} · ${o.day ? `${o.day.slice(4, 6)}-${o.day.slice(6)} 주문` : '끌어서 정정'}`;
+const orderTitle = (o) => `지정가 ${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}${fillPnl(o, o.price)} · 끌어서 정정`;
 function renderOrderLines(pending) {
   const want = new Map((pending || []).filter((o) => o.limit).map((o) => [o.number, o]));
   orderLines.forEach((v, n) => { if (!want.has(n)) { series.removePriceLine(v.line); orderLines.delete(n); } });
@@ -763,6 +767,27 @@ function chartClick(p) {
   keep('mnqDraw', draw.items);
   setTool(null);
 }
+// 수평선 더블클릭: 가격을 넣는 작은 창. 0.25틱에 맞춘다
+$('chart-wrap').addEventListener('dblclick', (e) => {
+  if (draw.tool || e.target.closest('#tools, #ctx-menu, #legend')) return;
+  const r = $('chart').getBoundingClientRect(), d = hitTest({ x: e.clientX - r.left, y: e.clientY - r.top });
+  if (!d || d.type !== 'hline') return;
+  const dlg = $('hline-edit'), input = $('hline-edit-price');
+  select(d);
+  input.value = d.price;
+  dlg.returnValue = '';
+  dlg.showModal();
+  input.select();
+  dlg.addEventListener('close', () => {
+    const v = Math.round(Number(input.value) * 4) / 4;
+    if (dlg.returnValue !== 'ok' || !(v > 0)) return;
+    d.price = v;
+    hlines.get(d)?.applyOptions({ price: v });
+    keep('mnqDraw', draw.items);
+    renderDrawings();
+  }, { once: true });
+});
+$('hline-edit-cancel').addEventListener('click', () => $('hline-edit').close());
 chart.subscribeCrosshairMove((p) => {
   draw.mouse = pointAt(p);  // Alt + H가 쓸 마우스 자리
   if (!draw.start) return;
@@ -772,27 +797,40 @@ chart.subscribeCrosshairMove((p) => {
 chart.timeScale().subscribeVisibleLogicalRangeChange(() => renderDrawings());
 new ResizeObserver(() => renderDrawings()).observe($('chart-wrap'));
 
-// 보조 지표: 같은 차트 아래쪽에 따로 띄운 가격 축(칸)에. 지금 보는 봉 단위의 종가로 계산한다
+// 보조 지표: 본 차트 아래 따로 나눈 칸(pane)에. 캔들과 겹치지 않는다. 지금 보는 봉 단위의 종가로 계산한다
 const ema = (xs, n) => { const k = 2 / (n + 1); let e = xs[0]; return xs.map((x) => (e = x * k + e * (1 - k))); };
-const studyLine = (scale, color, title) => chart.addLineSeries({ priceScaleId: scale, color, title, lineWidth: 1, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false });
-const rsiSeries = studyLine('rsi', '#a78bfa', 'RSI 14');
-const macdHist = chart.addHistogramSeries({ priceScaleId: 'macd', priceLineVisible: false, lastValueVisible: false });
-const macdSeries = studyLine('macd', '#60a5fa', 'MACD');
-const signalSeries = studyLine('macd', '#f59e0b', 'Signal');
+const studyLine = (pane, color, title) => chart.addSeries(LightweightCharts.LineSeries, { color, title, lineWidth: 1, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false }, pane);
+let rsiSeries = null, macdHist = null, macdSeries = null, signalSeries = null, paneKey = '';
+// 켜고 끌 때만 칸을 다시 만든다: RSI가 먼저, MACD가 그 아래, 본 차트 : 지표 칸 = 4 : 1
+function layoutPanes(rsi, macd) {
+  const key = `${rsi}${macd}`;
+  if (key === paneKey) return;
+  paneKey = key;
+  [rsiSeries, macdHist, macdSeries, signalSeries].forEach((s) => s && chart.removeSeries(s));
+  rsiSeries = macdHist = macdSeries = signalSeries = null;
+  while (chart.panes().length > 1) chart.removePane(chart.panes().length - 1);
+  let pane = 0;
+  if (rsi) {
+    rsiSeries = studyLine(++pane, '#a78bfa', 'RSI 14');
+    [70, 30].forEach((v) => rsiSeries.createPriceLine({ price: v, color: token('--text-3'), lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false, title: String(v) }));
+  }
+  if (macd) {
+    macdHist = chart.addSeries(LightweightCharts.HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, ++pane);
+    macdSeries = studyLine(pane, '#60a5fa', 'MACD');
+    signalSeries = studyLine(pane, '#f59e0b', 'Signal');
+  }
+  chart.panes().forEach((p, i) => p.setStretchFactor(i ? 1 : 4));  // setHeight는 칸이 여럿이면 서로 밀어내 비율로 정한다
+}
 // 일목균형표: 전환선·기준선·후행스팬은 본 차트의 선으로, 선행스팬 A·B와 구름은 그리기 층에(renderCloud)
-const ichiLine = (color, title) => chart.addLineSeries({ color, title, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+const ichiLine = (color, title) => chart.addSeries(LightweightCharts.LineSeries, { color, title, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
 const tenkanSeries = ichiLine('#38bdf8', '전환선');
 const kijunSeries = ichiLine('#f472b6', '기준선');
 const chikouSeries = ichiLine('#a3a3a3', '후행스팬');
-[70, 30].forEach((v) => rsiSeries.createPriceLine({ price: v, color: token('--text-3'), lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false, title: String(v) }));
 
 function renderStudies() {
   const { macd, rsi } = draw.studies;
-  const n = (macd ? 1 : 0) + (rsi ? 1 : 0);
-  // 칸 나누기: 지표 하나에 아래 20%씩, 본 차트는 그 위
-  series.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.05 + 0.2 * n } });
-  if (rsi) chart.priceScale('rsi').applyOptions({ scaleMargins: { top: macd ? 0.6 : 0.8, bottom: macd ? 0.22 : 0.02 } });
-  if (macd) chart.priceScale('macd').applyOptions({ scaleMargins: { top: 0.8, bottom: 0.02 } });
+  layoutPanes(!!rsi, !!macd);
+  series.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.05 } });
   const bars = state.bars, closes = bars.map((b) => b.close), at = (i) => bars[i].time + TZ;
   if (rsi && bars.length > 15) {
     // RSI 14(와일더 평균)
@@ -805,7 +843,7 @@ function renderStudies() {
       if (i >= 14) out.push({ time: at(i), value: down ? 100 - 100 / (1 + up / down) : 100 });
     }
     rsiSeries.setData(out);
-  } else rsiSeries.setData([]);
+  } else if (rsiSeries) rsiSeries.setData([]);
   if (macd && bars.length > 35) {
     const fast = ema(closes, 12), slow = ema(closes, 26);
     const line = closes.map((_, i) => fast[i] - slow[i]);
@@ -814,7 +852,7 @@ function renderStudies() {
     macdSeries.setData(line.slice(from).map((v, i) => ({ time: at(i + from), value: v })));
     signalSeries.setData(sig.slice(from).map((v, i) => ({ time: at(i + from), value: v })));
     macdHist.setData(line.slice(from).map((v, i) => ({ time: at(i + from), value: v - sig[i + from], color: (v - sig[i + from] >= 0 ? UP : DOWN) + '99' })));
-  } else [macdSeries, signalSeries, macdHist].forEach((x) => x.setData([]));
+  } else if (macdSeries) [macdSeries, signalSeries, macdHist].forEach((x) => x.setData([]));
   if (draw.studies.ichimoku && bars.length > 52) {
     // 전환선 9, 기준선 26: 그 기간 고가·저가의 가운데. 선행스팬 A = (전환 + 기준) / 2, B = 52기간 가운데, 둘 다 26봉 앞에. 후행스팬 = 종가를 26봉 뒤에
     const mid = (i, n) => {
@@ -853,7 +891,7 @@ function marker(time, from, to, long, pnl) {
 function renderMarkers() {
   const c = current();
   if (!c) {  // 매매법을 풀었으면 화살표·추천 구간·가상 진입선을 지운다
-    series.setMarkers([]);
+    seriesMarkers.setMarkers([]);
     state.zones = [];
     if (entryLine) series.removePriceLine(entryLine);
     entryLine = null;
@@ -863,14 +901,15 @@ function renderMarkers() {
   if (!state.bars.length) return;
   const first = state.bars[0].time;
   let markers;
-  if (state.interval === 'D') {
+  if (dayBars()) {
     // 일봉: 규칙을 2021년부터 돌렸을 때의 자리(과거 시험) + 가상 계좌의 실제 매매(그날 종가로 정한 날짜에)
     const days = new Map(((state.signals || {})[c.key] || []).filter((s) => s.time >= first).map((s) => [s.time, s]));
     c.trades.filter((t) => t.to !== t.from).forEach((t) => {
       const day = Date.parse(t.date) / 1000;  // 그날 0시(UTC): 일봉의 시각과 같다
       days.set(day, { time: day, from: t.from, to: t.to });
     });
-    markers = [...days.values()].map((s) => marker(s.time + TZ, s.from, s.to, false, s.pnl));
+    const at = state.interval === 'W' ? weekStart : (t) => t;  // 주봉: 그 주의 봉에
+    markers = [...days.values()].map((s) => marker(at(s.time) + TZ, s.from, s.to, false, s.pnl));
   } else {
     // 분봉: 가상 계좌를 시작하기 전은 과거 시험(1시간봉으로 돌린 것), 그 뒤는 가상 계좌의 실제 매매.
     // 스캘핑은 과거 시험이 오늘 1분봉까지 이어지므로(서버가 1분마다 다시 계산) 그것만 그리고, 진입 ~ 청산을 추천 구간 상자로도 보인다
@@ -881,15 +920,15 @@ function renderMarkers() {
       .map((t) => marker(Math.floor(t.time / step) * step + TZ, t.from, t.to, true, t.pnl));
   }
   state.zones = [];
-  if (c.scalp && state.interval !== 'D') {
+  if (c.scalp && !dayBars()) {
     scalpShown(c).forEach((t) => {
       if (t.from === 0 && t.to) state.zones.push({ side: t.to, t1: t.time, p1: t.price, t2: null, p2: null });
       else if (t.to === 0 && state.zones.length) Object.assign(state.zones[state.zones.length - 1], { t2: t.time, p2: t.price, why: t.why });
     });
   }
   renderDrawings();
-  if (c.mtf && state.interval !== 'D') markers = markers.concat(mtfMarkers(first));  // 매매법 'MACD 동시 반전': 세 단계 신호
-  series.setMarkers(markers.sort((a, b) => a.time - b.time));
+  if (c.mtf && !dayBars()) markers = markers.concat(mtfMarkers(first));  // 매매법 'MACD 동시 반전': 세 단계 신호
+  seriesMarkers.setMarkers(markers.sort((a, b) => a.time - b.time));
   if (entryLine) series.removePriceLine(entryLine);
   entryLine = c.contracts && c.entry ? series.createPriceLine({
     price: c.entry, color: c.contracts > 0 ? UP : DOWN, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
@@ -1097,7 +1136,7 @@ function renderLive(d) {
     ['이번 주 체결', d.week == null ? '-' : `<b class="${d.week >= d.min_weekly ? 'c-up' : ''}">${d.week}</b> / ${d.min_weekly}건 <small>(모자라면 금요일 뉴욕 14시부터 채움)</small>`],
     ['상태', d.error ? `<span class="c-down">${d.error}</span>` : d.note || '-'],
   ].concat((d.pending || []).length ? [['미체결', d.pending.map((o) => `<b class="${tone(o.qty)}">${o.qty > 0 ? '매수' : '매도'} ${Math.abs(o.qty)}</b>`
-    + (o.limit ? ` @ ${fmtPrice(o.price)}` : ' 시장가') + (o.day ? ` <small>(${o.day.slice(4, 6)}-${o.day.slice(6)} 주문)</small>` : '')).join('<br>') + '<button class="pending-cancel" data-cancel>취소</button>']] : [])) + (orders ? `<table class="trend-table"><tbody>${orders}</tbody></table>` : '<p class="empty">아직 주문이 없습니다.</p>');
+    + (o.limit ? ` @ ${fmtPrice(o.price)}` : ' 시장가')).join('<br>') + '<button class="pending-cancel" data-cancel>취소</button>']] : [])) + (orders ? `<table class="trend-table"><tbody>${orders}</tbody></table>` : '<p class="empty">아직 주문이 없습니다.</p>');
 }
 
 // 직접 주문: 시장가로 바로 나가고 자동 주문은 꺼진다(켜 두면 30초 뒤 목표 계약 수로 되돌리기 때문)
@@ -1121,7 +1160,8 @@ $('trade-buttons').addEventListener('click', async (e) => {
     }
     return afterOrder();
   }
-  if (!await ask(flat ?`${est.length ? est.map((x) => x.text).join('\n\n') + '\n\n' : '들고 있는 포지션이 없습니다.\n'}모든 포지션을 시장가로 정리하고 자동 주문을 멈출까요?`
+  const pend = ((state.live && state.live.pending) || []).length;
+  if (!await ask(flat ?`${est.length ? est.map((x) => x.text).join('\n\n') + '\n\n' : '들고 있는 포지션이 없습니다.\n'}${pend ? `미체결 주문 ${pend}건을 먼저 모두 취소하고, ` : ''}모든 포지션을 시장가로 정리하고 자동 주문을 멈출까요?`
     : `MNQ ${Math.abs(qty)}계약을 시장가로 ${qty > 0 ? '매수' : '매도'}할까요?\n자동 주문은 꺼집니다(아이콘 메뉴에서 다시 켜면 목표 계약 수로 되돌립니다).`, flat ? '포지션 정리' : '직접 주문')) return;
   try {
     await sending(b, () => (flat ? post('/api/live/flatten', {}) : post('/api/live/order', { qty })));
@@ -1414,11 +1454,11 @@ function chooseInterval(key) {
   state.interval = key;
   state.generation += 1;
   state.last = null;
-  state.noOlder = key === 'D';
+  state.noOlder = key === 'D' || key === 'W';
   localStorage.setItem('mnqInterval', key);
   $('intervals').innerHTML = Object.entries(INTERVALS).map(([k, name]) =>
     `<button data-key="${k}" class="${k === key ? 'active' : ''}" aria-pressed="${k === key}">${name}</button>`).join('');
-  chart.applyOptions({ timeScale: { timeVisible: key !== 'D' } });
+  chart.applyOptions({ timeScale: { timeVisible: key !== 'D' && key !== 'W' } });
   $('chart-msg').hidden = false;
   loadBars(true).catch((e) => { $('chart-msg').textContent = '차트를 불러오지 못했습니다: ' + e.message; });
 }

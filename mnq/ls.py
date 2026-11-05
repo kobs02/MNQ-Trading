@@ -219,10 +219,10 @@ def limit_order(symbol, qty, price):
     return _new_order(symbol, qty, price)
 
 
-def cancel(symbol, number, day=None):
-    """미체결 주문 취소(CIDBT01000). day는 그 주문의 거래일(기본 지금 거래일). 취소 주문의 번호를 돌려준다."""
+def cancel(symbol, number):
+    """미체결 주문 취소(CIDBT01000). 취소 주문의 번호를 돌려준다."""
     data, _ = call("CIDBT01000", {"CIDBT01000InBlock1": {
-        "RecCnt": 1, "OrdDt": day or order_day(), "BrnNo": " ", "IsuCodeVal": symbol, "OvrsFutsOrgOrdNo": number,
+        "RecCnt": 1, "OrdDt": order_day(), "BrnNo": " ", "IsuCodeVal": symbol, "OvrsFutsOrgOrdNo": number,
         "FutsOrdTpCode": "3", "PrdtTpCode": " ", "ExchCode": " "}})  # 3 취소
     done = (data.get("CIDBT01000OutBlock2") or {}).get("OvrsFutsOrdNo")
     if not done or not done.strip("0"):
