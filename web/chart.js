@@ -1030,7 +1030,7 @@ function mtfLegend() {
     + `<ul class="mtf-legend">${row(3, '2개 이상 꺾임 + RSI 과매도(매수 &lt; 30)·과매수(매도 &gt; 70)', '금색 큰 화살표 · 가상 계좌 1계약')}`
     + `${row(2, '3개 이상 같은 방향으로 꺾임', '진한 보통 화살표 · 가상 계좌 1계약')}${row(1, '2개 같은 방향으로 꺾임', '옅은 작은 화살표 · 표시만')}</ul>`
     + '<p class="why-foot">화살표 옆 숫자는 함께 꺾인 분봉입니다(예: 1 / 5 = 1분봉과 5분봉, 60 = 1시간봉).</p>'
-    + `<p class="why-foot mtf-alarm">🔔 알람 ${[3, 2, 1].map((lv) => `<label><input type="checkbox" data-alarm="${lv}"${mtfAlarm.includes(lv) ? ' checked' : ''}> ${lv === 3 ? '★' : ''}${MTF[lv].name}</label>`).join('')}</p>`
+    + `<p class="why-foot mtf-alarm">알람 ${[3, 2, 1].map((lv) => `<label><input type="checkbox" data-alarm="${lv}"${mtfAlarm.includes(lv) ? ' checked' : ''}> ${lv === 3 ? '★' : ''}${MTF[lv].name}</label>`).join('')}</p>`
     + (s ? `<p class="why-sum">마지막 신호 ${fmtTime(s.time + 60)} · <b class="${s.level === 3 ? 'mtf-gold' : tone(s.side)}">${s.level === 3 ? '★' : ''}${MTF[s.level].name} ${s.side > 0 ? '▲ 매수' : '▼ 매도'}</b> ${mtfTfs(s)}`
       + (s.level === 3 ? ` · RSI ${mtfRsi(s)}` : '') + '</p>' : '') + '</div>';
 }
