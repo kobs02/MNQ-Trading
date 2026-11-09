@@ -40,12 +40,13 @@
           <button data-tool="hline" aria-pressed="false" title="누른 가격에 가로선 · 단축키 Alt + H: 마우스 자리에 바로">수평선</button>
           <button data-tool="trend" aria-pressed="false" title="두 점을 눌러 추세선 · 고른 뒤 양 끝 손잡이를 끌어 옮긴다">추세선</button>
           <button data-tool="box" aria-pressed="false" title="두 번 눌러 사각형 · Ctrl을 누른 채 드래그해도 된다 (Shift + 드래그는 재기: 현재가 기준 몇 %)">박스</button>
-          <button data-study="ma200" aria-pressed="false" title="200일선(일봉은 선, 분봉은 지금 값 가로선)">200일선</button>
+          <button data-study="ma" aria-pressed="false" title="200·120·60·5일선(일봉은 선, 분봉은 지금 값 가로선)">이동평균</button>
           <button data-study="macd" aria-pressed="false" title="MACD 12, 26, 9">MACD</button>
           <button data-study="rsi" aria-pressed="false" title="RSI 14">RSI</button>
           <button data-study="ichimoku" aria-pressed="false" title="일목균형표 9, 26, 52">일목</button>
-          <input type="color" id="hline-color" class="hline-color" hidden title="고른 수평선·박스의 색" aria-label="고른 수평선·박스의 색">
-          <button data-clean aria-pressed="false" title="수평선·추세선·박스·일목균형표를 잠시 숨긴다(지우지 않음). 다시 누르면 보인다">숨기기</button>
+          <input type="color" id="hline-color" class="hline-color" hidden title="고른 수평선·추세선·박스의 색" aria-label="고른 수평선·추세선·박스의 색">
+          <button data-lines aria-pressed="false" title="수평선·추세선만 잠시 숨긴다(지우지 않음). 박스·일목균형표는 그대로">선 숨기기</button>
+          <button data-cleanaria-pressed="false" title="수평선·추세선·박스·일목균형표를 잠시 숨긴다(지우지 않음). 다시 누르면 보인다">숨기기</button>
           <button data-tool="clear" title="수평선·추세선·박스를 눌러 고른 뒤 지운다(Delete 키도 된다). 고른 것이 없으면 모두 지울지 묻는다">지우기</button>
         </nav>
         <svg id="draw" class="draw-layer" aria-hidden="true"></svg>
@@ -53,6 +54,8 @@
         <div id="chart-msg" class="chart-msg" role="status">차트를 불러오는 중…</div>
         <div id="ctx-menu" class="ctx-menu" role="menu" hidden></div>
       </section>
+      <!-- 차트와 계좌 칸의 경계: 마우스를 올리면 화살표, 누르면 계좌 칸을 숨기고 차트를 키운다 -->
+      <button id="acct-edge" class="acct-edge" type="button" aria-controls="account" aria-expanded="true" title="LS 모의계좌 숨기기"><span aria-hidden="true">▼</span></button>
       <!-- LS 모의계좌의 실제 자산과 포지션(바이낸스의 포지션 칸처럼) -->
       <section id="account" class="account-panel" aria-labelledby="account-title">
         <div class="account-head">

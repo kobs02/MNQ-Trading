@@ -73,7 +73,9 @@ let entryLine = null;
 // 규칙이 보는 값(지표): 일봉의 선 두 개와 분봉의 가로선들
 const lineOpts = (color, title) => ({ color, title, lineWidth: 1, priceLineVisible: false, crosshairMarkerVisible: false, lastValueVisible: true,
   priceFormat: { type: 'custom', minMove: 0.25, formatter: fmtPrice } });
-const smaSeries = chart.addSeries(LightweightCharts.LineSeries, lineOpts(token('--accent'), '200일선'));
+// 이동평균: 200일선은 규칙이 보는 값이라 매매법만 골라도 켜지고, 도구 막대 '이동평균'은 넷을 모두 켠다
+const MAS = [[200, '--accent'], [120, '--line-2'], [60, '--line'], [5, '--draw']]
+  .map(([n, color]) => ({ n, color, series: chart.addSeries(LightweightCharts.LineSeries, lineOpts(token(color), `${n}일선`)) }));
 const lowSeries = chart.addSeries(LightweightCharts.LineSeries, { ...lineOpts(token('--text-3'), '5일 최저 종가'), lineStyle: LightweightCharts.LineStyle.Dotted,
   lineType: LightweightCharts.LineType.WithSteps });
 let levelLines = [];
@@ -179,18 +181,31 @@ const nyHour = () => Number(new Date().toLocaleString('en-US', { timeZone: 'Amer
 
 // 규칙이 보는 값을 차트에: 일봉은 차트의 봉(NQ 선물)으로 계산한 200일선·5일 최저 종가(규칙은 나스닥100 지수로 보므로 수준이 조금 다르다),
 // 분봉은 장중 갈래가 오늘 보는 9시 시가와 다음 판단 시각의 노이즈 경계(LS MNQ 1시간봉으로 계산한 그대로)
+// 주봉: 일봉 n일 이동평균을 그 주 마지막 거래일 값으로(주봉 200개 평균이 아니다)
+function weeklyMa(n) {
+  const t = state.dailyTimes, dc = state.dailyCloses, at = new Map();
+  if (!t || !dc) return [];
+  let sum = 0;
+  dc.forEach((v, i) => {
+    sum += v - (i >= n ? dc[i - n] : 0);
+    if (i >= n - 1) at.set(weekStart(t[i]), sum / n);
+  });
+  return state.bars.filter((b) => at.has(b.time)).map((b) => ({ time: b.time + TZ, value: at.get(b.time) }));
+}
 let levelsKey = null;
 function renderLevels() {
   const c = current();
   // 0.5초마다 불리므로 후보·봉 단위·봉 개수·경계·시가 바뀔 때만 다시 그린다
-  const ma = draw.studies.ma200 || (c && c.rule !== 'flat');  // 도구 막대의 '200일선'은 매매법과 상관없이 켠다
-  const key = [state.interval, c && c.key, ma, state.bars.length, c && JSON.stringify(c.noise), nyHour(), (state.dailyCloses || []).length].join('|');
+  const all = Boolean(draw.studies.ma), ma = all || (c && c.rule !== 'flat');
+  const shown = MAS.filter((m) => all || (ma && m.n === 200));
+  const key = [state.interval, c && c.key, all, ma, state.bars.length, c && JSON.stringify(c.noise), nyHour(), (state.dailyCloses || []).length].join('|');
   if (key === levelsKey) return;
   levelsKey = key;
   const daily = state.interval === 'D';
   const closes = state.bars.map((b) => b.close);
   const roll = (n, f) => state.bars.slice(n - 1).map((b, i) => ({ time: b.time + TZ, value: f(closes.slice(i, i + n)) }));
-  smaSeries.setData(daily && ma ? roll(200, (w) => w.reduce((a, v) => a + v, 0) / w.length) : []);
+  const avg = (w) => w.reduce((a, v) => a + v, 0) / w.length;
+  MAS.forEach((m) => m.series.setData(!shown.includes(m) ? [] : daily ? roll(m.n, avg) : state.interval === 'W' ? weeklyMa(m.n) : []));
   lowSeries.setData(daily && c && c.rule === 'dip_trend' ? roll(5, (w) => Math.min(...w)) : []);
   levelLines.forEach((l) => series.removePriceLine(l));
   levelLines = [];
@@ -198,7 +213,7 @@ function renderLevels() {
   const line = (price, color, title) => levelLines.push(series.createPriceLine({ price, color, title, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true }));
   // 분봉: 일봉 지표의 지금 값(일봉 화면의 두 선의 마지막 값)을 가로선으로. 화면의 가격 범위 밖이면 보이지 않는다
   const dc = state.dailyCloses;
-  if (dc && dc.length >= 200 && ma) line(dc.slice(-200).reduce((a, v) => a + v, 0) / 200, token('--accent'), '200일선');
+  if (state.interval !== 'W') shown.forEach((m) => { if (dc && dc.length >= m.n) line(avg(dc.slice(-m.n)), token(m.color), `${m.n}일선`); });
   if (!c) return;
   if (dc && dc.length >= 5 && c.rule === 'dip_trend') line(Math.min(...dc.slice(-5)), token('--text-3'), '5일 최저 종가');
   const n = c.noise;
@@ -218,6 +233,7 @@ const load = (k, v) => { try { return JSON.parse(localStorage.getItem(k)) || v; 
 const keep = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 저장 못 해도 화면은 그대로 */ } };
 const draw = { tool: null, start: null, hover: null, mouse: null, ichi: null, selected: null, items: load('mnqDraw', []), studies: load('mnqStudies', { macd: false, rsi: false, ichimoku: false }) };
 const hlines = new Map();  // 수평선 항목 → 가격선 객체
+const lineHidden = (d) => draw.hideLines && (d.type === 'hline' || d.type === 'trend');  // '선 숨기기': 수평선·추세선만 (박스는 그대로)
 
 // 시각 → 지금 봉 단위에서 그 시각이 들어가는 봉의 x 좌표(봉 사이 시각도 그 봉으로). 마지막 봉 뒤(미래)는 봉 간격으로 늘려 잡는다
 const barStep = () => (state.interval === 'W' ? 7 * 86400 : state.interval === 'D' ? 86400 : state.interval * 60);
@@ -247,13 +263,13 @@ function pointAt(p) {
 
 function renderDrawings() {
   // 수평선: 가격선으로(가격 축에 값이 보인다)
-  const shown = draw.clean ? [] : draw.items;  // 숨기기: 그린 것은 그대로 두고 그리지만 않는다
+  const shown = draw.clean ? [] : draw.items.filter((d) => !lineHidden(d));  // 숨기기: 그린 것은 그대로 두고 그리지만 않는다
   const want = new Set(shown.filter((d) => d.type === 'hline'));
   hlines.forEach((line, d) => { if (!want.has(d)) { series.removePriceLine(line); hlines.delete(d); } });
   want.forEach((d) => {
     if (!hlines.has(d)) hlines.set(d, series.createPriceLine({ price: d.price, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: '' }));
     const on = d === draw.selected;  // 고른 선은 굵은 점선
-    hlines.get(d).applyOptions({ color: d.color || token('--draw'), lineWidth: on ? 2 : 1, lineStyle: on ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid });
+    hlines.get(d).applyOptions({ price: d.price, color: d.color || token('--draw'), lineWidth: on ? 2 : 1, lineStyle: on ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid });
   });
   // 박스: 그리기 층(SVG)에. 그리는 중이면 커서까지 미리 보여 준다
   const boxes = shown.filter((d) => d.type === 'box');
@@ -268,7 +284,7 @@ function renderDrawings() {
     return `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="${color}" fill-opacity="${d.preview ? 0.03 : on ? 0.12 : 0.06}" stroke="${color}" stroke-width="${on ? 2 : 1}"${d.preview || on ? ' stroke-dasharray="4 3"' : ''}/>`
       + (on ? boxCorners(d).map((c) => (c.edge ? `<circle cx="${c.x}" cy="${c.y}" r="4"` : `<rect x="${c.x - 4}" y="${c.y - 4}" width="8" height="8"`)
         + ` fill="${token('--panel')}" stroke="${color}" stroke-width="2"/>`).join('') : '');
-  }).join('') + trends.map((d) => renderTrend(d, token('--draw'))).join('') + renderMeasure() + renderOrderTags();
+  }).join('') + trends.map((d) => renderTrend(d, d.color || token('--draw'))).join('') + renderMeasure() + renderOrderTags();
 }
 // 추세선: 두 점을 잇는 선. 고르면 굵은 점선과 양 끝 손잡이(boxCorners와 같은 꼴이라 같은 끌기로 옮긴다)
 function renderTrend(d, color) {
@@ -356,6 +372,7 @@ function hitTest(pt) {
   if (!pt || draw.clean) return null;  // 숨긴 것은 눌러 고르지 못하게(안 보이는 것을 Delete로 지우지 않게)
   for (let i = draw.items.length - 1; i >= 0; i--) {
     const d = draw.items[i];
+    if (lineHidden(d)) continue;
     if (d.type === 'hline') {
       const y = series.priceToCoordinate(d.price);
       if (y != null && Math.abs(y - pt.y) <= 5) return d;
@@ -373,14 +390,14 @@ function hitTest(pt) {
 }
 function select(d) {
   draw.selected = d;
-  // 수평선·박스를 고르면 도구 막대에 색 고르기가 나온다
-  const colorable = d && (d.type === 'hline' || d.type === 'box');
+  // 수평선·추세선·박스를 고르면 도구 막대에 색 고르기가 나온다
+  const colorable = d && ['hline', 'trend', 'box'].includes(d.type);
   $('hline-color').hidden = !colorable;
   if (colorable) $('hline-color').value = d.color || token(d.type === 'box' ? '--accent' : '--draw');
   renderDrawings();
 }
 $('hline-color').addEventListener('input', (e) => {
-  if (!draw.selected || (draw.selected.type !== 'hline' && draw.selected.type !== 'box')) return;
+  if (!draw.selected || !['hline', 'trend', 'box'].includes(draw.selected.type)) return;
   draw.selected.color = e.target.value;
   keep('mnqDraw', draw.items);
   renderDrawings();
@@ -416,7 +433,7 @@ function renderTools() {
   $('tools').querySelectorAll('button').forEach((b) => {
     if (b.dataset.tool === 'clear') return;
     if ('clean' in b.dataset) { b.classList.toggle('active', Boolean(draw.clean)); b.setAttribute('aria-pressed', Boolean(draw.clean)); return; }
-    const on = b.dataset.tool ? draw.tool === b.dataset.tool : Boolean(draw.studies[b.dataset.study]);
+    const on = 'lines' in b.dataset ? Boolean(draw.hideLines) : b.dataset.tool ? draw.tool === b.dataset.tool : Boolean(draw.studies[b.dataset.study]);
     b.classList.toggle('active', on);
     b.setAttribute('aria-pressed', on);
   });
@@ -431,6 +448,7 @@ function setClean(on) {
 function setTool(tool) {
   draw.tool = draw.tool === tool ? null : tool;
   if (draw.tool && draw.clean) setClean(false);  // 숨긴 채로 그리면 그린 것이 안 보이므로
+  if (lineHidden({ type: draw.tool })) draw.hideLines = false;
   draw.start = draw.hover = null;
   $('chart-wrap').classList.toggle('drawing', Boolean(draw.tool));
   renderTools();
@@ -452,7 +470,12 @@ $('tools').addEventListener('click', async (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   if ('clean' in b.dataset) setClean(!draw.clean);
-  else if (b.dataset.study) {
+  else if ('lines' in b.dataset) {
+    draw.hideLines = !draw.hideLines;
+    if (draw.selected && lineHidden(draw.selected)) draw.selected = null;  // 안 보이는 선을 Delete로 지우지 않게
+    renderTools();
+    renderDrawings();
+  } else if (b.dataset.study) {
     draw.studies[b.dataset.study] = !draw.studies[b.dataset.study];
     keep('mnqStudies', draw.studies);
     renderTools();
@@ -491,9 +514,10 @@ document.addEventListener('keydown', (e) => {
     const r = $('chart').getBoundingClientRect();
     return pointAt({ point: { x: e.clientX - r.left, y: e.clientY - r.top } });
   };
-  // 고른 박스의 모서리 손잡이(6px 안)
+  // 고른 박스의 모서리 손잡이(6px 안), 고른 수평선은 선 자체(위아래 5px)
   const corner = (e) => {
     const d = draw.selected, r = $('chart').getBoundingClientRect();
+    if (d && d.type === 'hline') return Math.abs(series.priceToCoordinate(d.price) - (e.clientY - r.top)) <= 5 ? { d, hline: true } : null;
     if (!d || (d.type !== 'box' && d.type !== 'trend')) return null;
     const c = (d.type === 'trend' ? trendEnds(d).filter(Boolean) : boxCorners(d)).find((c) => Math.abs(c.x - (e.clientX - r.left)) <= 6 && Math.abs(c.y - (e.clientY - r.top)) <= 6);
     return c ? { d, ...c } : null;
@@ -503,7 +527,7 @@ document.addEventListener('keydown', (e) => {
   wrap.addEventListener('pointermove', (e) => {
     if (dragging) return;
     const c = corner(e);
-    wrap.style.cursor = c ? (!c.pk ? 'col-resize' : !c.tk ? 'row-resize' : 'nwse-resize') : RESIZE.includes(wrap.style.cursor) ? '' : wrap.style.cursor;
+    wrap.style.cursor = c ? (c.hline ? 'row-resize' : !c.pk ? 'col-resize' : !c.tk ? 'row-resize' : 'nwse-resize') : RESIZE.includes(wrap.style.cursor) ? '' : wrap.style.cursor;
   });
   // 손잡이를 끌면 크기 조절: 그 손잡이의 시각·가격만 옮긴다(맞은편은 그대로, 변 가운데는 한쪽만)
   wrap.addEventListener('pointerdown', (e) => {
@@ -517,6 +541,7 @@ document.addEventListener('keydown', (e) => {
       ev.stopPropagation();
       const p = at(ev);
       if (!p) return;
+      if (c.hline) c.d.price = p.price;  // 수평선: 마우스 가격으로 옮긴다
       if (c.tk) c.d[c.tk] = { ...c.d[c.tk], time: p.time };
       if (c.pk) c.d[c.pk] = { ...c.d[c.pk], price: p.price };
       renderDrawings();
@@ -796,6 +821,15 @@ chart.subscribeCrosshairMove((p) => {
 });
 chart.timeScale().subscribeVisibleLogicalRangeChange(() => renderDrawings());
 new ResizeObserver(() => renderDrawings()).observe($('chart-wrap'));
+
+// 차트·계좌 경계 손잡이: 누를 때마다 LS 모의계좌 칸을 숨기고 보인다(차트는 autoSize라 저절로 커진다)
+$('acct-edge').addEventListener('click', e => {
+  const hidden = $('chart-col').classList.toggle('acct-hidden');
+  const b = e.currentTarget;
+  b.firstElementChild.textContent = hidden ? '▲' : '▼';
+  b.title = hidden ? 'LS 모의계좌 보이기' : 'LS 모의계좌 숨기기';
+  b.setAttribute('aria-expanded', String(!hidden));
+});
 
 // 보조 지표: 본 차트 아래 따로 나눈 칸(pane)에. 캔들과 겹치지 않는다. 지금 보는 봉 단위의 종가로 계산한다
 const ema = (xs, n) => { const k = 2 / (n + 1); let e = xs[0]; return xs.map((x) => (e = x * k + e * (1 - k))); };
@@ -1145,12 +1179,12 @@ $('trade-buttons').addEventListener('click', async (e) => {
   if (!b) return;
   const flat = b.hasAttribute('data-flatten'), qty = Number(b.dataset.qty) * sizeContracts().n;
   const est = flat ? (account ? account.view : []).map(closeEstimate) : [];
-  if (b.hasAttribute('data-flip')) {  // 뒤집기: 지금 포지션을 닫고 고른 비중만큼 반대로(시장가 한 건). 닫을 몫은 서버가 주문 직전의 실제 포지션으로 정한다
+  if (b.hasAttribute('data-flip')) {  // 뒤집기: 지금 포지션을 닫고 고른 비중만큼 반대로(정리 → 0 확인 → 진입, 시장가 두 건). 닫을 몫은 서버가 주문 직전의 실제 포지션으로 정한다
     const p = account && account.view.find((x) => state.quote && x.symbol === state.quote.symbol);
     if (!p) return notice('뒤집을 포지션이 없습니다.');
     const n = sizeContracts().n;
     const now = position(p.qty).replace(/<[^>]+>/g, ''), next = position(-Math.sign(p.qty) * n).replace(/<[^>]+>/g, '');
-    if (!await ask(`${now} → ${next}: 시장가 ${p.qty > 0 ? '매도' : '매수'} ${Math.abs(p.qty) + n}계약 한 건\n\n`
+    if (!await ask(`${now} → ${next}: 시장가 ${p.qty > 0 ? '매도' : '매수'} ${Math.abs(p.qty)}계약으로 정리하고, 0계약이 확인되면 ${n}계약 진입(두 건)\n\n`
       + `지금 포지션을 닫는 몫\n${closeEstimate(p).text}\n새 ${next.split(' ')[0]} ${n}계약(고른 비중) 진입에 수수료 $${(CONTEST_FEE + BROKER_FEE) * n} 더\n\n`
       + '자동 주문은 꺼집니다(켜 두면 30초 뒤 목표 계약 수로 되돌리기 때문).', '포지션 뒤집기')) return;
     try {
@@ -1441,7 +1475,7 @@ async function tickTrading() {
     }
     if (!state.dailyCloses || Date.now() - state.dailyAt > 600000) {  // 일봉 종가는 10분마다
       state.dailyAt = Date.now();
-      api('/api/chart?interval=D').then((d) => { state.dailyCloses = d.bars.map((b) => b.close); renderLevels(); }).catch(() => {});
+      api('/api/chart?interval=D').then((d) => { state.dailyTimes = d.bars.map((b) => b.time); state.dailyCloses = d.bars.map((b) => b.close); renderLevels(); }).catch(() => {});
     }
     api('/api/live').then(renderLive).catch(() => {});
     state.trading = await api('/api/trading');
@@ -1609,7 +1643,8 @@ tickTrading();
 tickAccount();
 // 정리까지 남은 시간: 시세가 멈춰도(주말) 1초마다 흐르게 칸을 다시 그리지 않고 글자만 바꾼다
 setInterval(() => document.querySelectorAll('[data-until]').forEach((el) => { el.textContent = fmtLeft(Number(el.dataset.until)); }), 1000);
-setInterval(tickBars, 500);
+// 탭이 뒤에 있으면 크롬이 setInterval을 1초(5분 넘으면 1분)에 한 번으로 묶어 탭 제목의 가격이 멈춘다. 워커의 타이머는 묶이지 않는다
+new Worker(URL.createObjectURL(new Blob(['setInterval(() => postMessage(0), 500)']))).onmessage = tickBars;
 setInterval(tickTrading, 15000);
 setInterval(tickAccount, 5000);
 setInterval(() => { if (!document.hidden) api('/api/live').then(renderLive).catch(() => {}); }, 2000);  // 미체결 선: 서버가 2초마다 LS에 묻는 값

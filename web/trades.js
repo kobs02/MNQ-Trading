@@ -3,7 +3,7 @@
 function walk(orders, mult, fee) {
   let pos = 0, avg = 0;
   return orders.map((o) => {
-    const qty = o.exec_qty != null ? Math.sign(o.qty) * o.exec_qty : o.ok ? o.qty : 0;  // LS 체결 수량이 없으면 낸 수량이 다 체결됐다고 본다
+    const qty = o.exec_qty != null ? Math.sign(o.qty) * o.exec_qty : o.ok && !o.limit ? o.qty : 0;  // LS 체결 수량이 없으면 시장가는 다 체결, 지정가는 안 됐다고 본다(걸려만 있던 지정가를 체결로 보면 포지션이 어긋난다)
     const px = o.exec_price || o.price;
     let realized = null, ret = null, closed = 0;
     if (qty && px) {

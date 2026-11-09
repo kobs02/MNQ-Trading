@@ -192,7 +192,8 @@ def _record(entry):
 def manual(qty=None, flip=False, reduce=None):
     """화면의 매수(+)·매도(-) 버튼. 자동 주문을 먼저 끈다(켜 두면 30초 뒤 목표 계약 수로 되돌린다).
     flip이면 주문 직전에 읽은 실제 포지션을 닫고 반대로 qty계약(화면에서 고른 비중, 없으면 같은 계약 수) 든다:
-    롱 5에 qty 3이면 매도 8 한 건 → 숏 3(정리와 진입을 시장가 한 건으로 해 사이에 가격이 움직이지 않게).
+    롱 5에 qty 3이면 매도 5(정리) → 0 확인 → 매도 3(진입). LS는 한 건으로 뒤집으면 닫는 몫에도 증거금을 매겨
+    01425(주문가능금액 부족)로 거절한다(11-02·11-03 20 → -20, 40계약 한 건). 정리가 체결되지 않으면 진입은 내지 않는다.
     reduce = n이면 분할 정리: 실제 포지션에서 n계약만 시장가로 닫는다."""
     if reduce is not None:
         if type(reduce) is not int or flip or qty is not None:
@@ -209,7 +210,22 @@ def manual(qty=None, flip=False, reduce=None):
         if flip:
             if not actual:
                 raise ValueError("뒤집을 포지션이 없습니다")
-            qty = -actual - (1 if actual > 0 else -1) * (qty or abs(actual))
+            qty = -(1 if actual > 0 else -1) * (qty or abs(actual))  # 정리 뒤 반대로 들 계약
+            if abs(qty) > config.LIVE["max_contracts"]:
+                raise ValueError(f"주문 뒤 {qty}계약이 최대({config.LIVE['max_contracts']}계약)를 넘습니다")
+            first = _send(_entry(symbol, -actual, actual, paper.status["price"], manual=True, flip=True), lambda: ls.market_order(symbol, -actual),
+                          f"포지션 뒤집기 1/2 정리: {_side(-actual)} {abs(actual)}계약 ({actual} → 0)")
+            if not first["ok"]:
+                raise ValueError("정리 주문이 거절됐습니다: " + first["error"])
+            for _ in range(10):  # 미결제잔고 조회는 초당 1건
+                time.sleep(1)
+                actual = int(ls.positions()[0].get(symbol, 0))
+                if not actual:
+                    break
+            else:
+                raise ValueError(f"정리 체결을 10초 안에 확인하지 못해(지금 {actual}계약) 반대 진입은 내지 않았습니다")
+            return _send(_entry(symbol, qty, 0, paper.status["price"], manual=True, flip=True), lambda: ls.market_order(symbol, qty),
+                         f"포지션 뒤집기 2/2 진입: {_side(qty)} {abs(qty)}계약 (0 → {qty})", " · 자동 주문은 껐습니다")
         if reduce is not None:
             qty = _reduce(actual, reduce)
         if abs(actual + qty) > config.LIVE["max_contracts"]:
@@ -590,8 +606,9 @@ def _build_history():
     rows = {}
     if symbol:
         day, today = datetime.fromtimestamp(config.LIVE["start"], KST).date(), datetime.strptime(ls.order_day(), "%Y%m%d").date()
+        sent = {ls.order_day(o["time"]) for o in mine if o.get("number")}
         while day <= today:  # 지금 거래일만 LS에 다시 묻는다
-            for r in _day_orders(symbol, day, done=day < today):
+            for r in _day_orders(symbol, day, done=day < today, expect=f"{day:%Y%m%d}" in sent):
                 # LS 주문번호는 거래일마다 새로 매긴다(10-19와 10-23에 둘 다 2229): 번호만으로 찾으면 지난 주문이 오늘 체결을 가져간다
                 rows[f"{day:%Y%m%d}", int(r["OvrsFutsOrdNo"])] = r
             day += timedelta(days=1)
@@ -647,12 +664,13 @@ def _exec_time(r, ordered):
     return {"time": int(t.timestamp()), "order_time": ordered}
 
 
-def _day_orders(symbol, day, done):
-    """그 거래일의 LS 주문내역. done(끝난 날)이면 store/ls_orders/에 두고 다시 묻지 않는다."""
+def _day_orders(symbol, day, done, expect=False):
+    """그 거래일의 LS 주문내역. done(끝난 날)이면 store/ls_orders/에 두고 다시 묻지 않는다.
+    expect = 이 프로그램이 그날 낸 주문이 있다: 빈 응답은 믿지 않는다(11-09 06:30 LS가 11-06을 빈 목록으로 줘 그대로 저장, 안 된 지정가 27계약을 체결로 봤다)."""
     path = config.STORE / "ls_orders" / f"{symbol}_{day:%Y%m%d}.json"
     if done and path.exists():
         rows = json.loads(path.read_text(encoding="utf-8"))
-        if not any(r.get("ExecQty") for r in rows) or any("ExecDttm" in r for r in rows):  # 10-20 전 저장본에는 체결 시각이 없어 한 번 다시 받는다
+        if (rows or not expect) and (not any(r.get("ExecQty") for r in rows) or any("ExecDttm" in r for r in rows)):  # 10-20 전 저장본에는 체결 시각이 없어 한 번 다시 받는다
             return rows
     rows = ls.orders(symbol, f"{day:%Y%m%d}")
     last = {}  # 주문번호 → 마지막 체결 시각(나눠 체결되면 마지막 것)
@@ -662,7 +680,7 @@ def _day_orders(symbol, day, done):
     for r in rows:
         if last.get(int(r["OvrsFutsOrdNo"])):
             r["ExecDttm"] = last[int(r["OvrsFutsOrdNo"])]
-    if done:
+    if done and (rows or not expect):
         path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
     return rows
@@ -739,12 +757,24 @@ if __name__ == "__main__":
         except ValueError:
             pass
     assert sent == [2, -3, 1, -2]
-    manual(flip=True)                             # 뒤집기: 숏 2 → 롱 2, 매수 4 한 건
-    assert sent == [2, -3, 1, -2, 4] and _state["orders"][-1]["to"] == 2, sent
-    book["pos"] = 2
-    manual(qty=3, flip=True)                      # 고른 비중으로 뒤집기: 롱 2 → 숏 3, 매도 5 한 건
-    assert sent[-1] == -5 and _state["orders"][-1]["to"] == -3, sent
-    sent.pop()
+    # 뒤집기는 정리 → 0 확인 → 진입 두 건(한 건이면 LS가 01425로 거절). 가짜 LS는 시장가를 바로 체결한다
+    market, sleep = ls.market_order, time.sleep
+    ls.market_order = lambda symbol, qty: book.update(pos=book["pos"] + qty) or market(symbol, qty)
+    time.sleep = lambda s: None
+    manual(flip=True)                             # 숏 2 → 0 → 롱 2
+    assert sent == [2, -3, 1, -2, 2, 2] and _state["orders"][-1]["to"] == 2 and book["pos"] == 2, sent
+    manual(qty=3, flip=True)                      # 고른 비중으로: 롱 2 → 0 → 숏 3
+    assert sent[-2:] == [-2, -3] and _state["orders"][-1]["to"] == -3 and book["pos"] == -3, sent
+    ls.market_order = market                      # 정리가 체결되지 않으면 진입은 내지 않는다
+    n = len(sent)
+    try:
+        manual(flip=True)
+        raise AssertionError("정리 확인 없이 진입")
+    except ValueError:
+        pass
+    assert sent[n:] == [3], sent[n:]
+    del sent[-5:]
+    time.sleep = sleep
     book["pos"] = 0
     try:
         manual(flip=True)

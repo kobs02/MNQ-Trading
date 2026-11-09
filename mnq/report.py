@@ -31,10 +31,10 @@ def minute_bars(since):
 
 
 def fills(orders):
-    """체결만 (시각, 계약 수 ±, 체결가). 주문 기록 화면(web/orders.js walk)과 같은 규칙: LS 체결 수량이 없으면 낸 수량이 다 체결됐다고 본다."""
+    """체결만 (시각, 계약 수 ±, 체결가). 주문 기록 화면(web/trades.js walk)과 같은 규칙: LS 체결 수량이 없으면 시장가는 다 체결, 지정가는 안 됐다고 본다."""
     out = []
     for o in orders:
-        q = (1 if o["qty"] > 0 else -1) * o["exec_qty"] if o.get("exec_qty") is not None else (o["qty"] if o.get("ok") else 0)
+        q = (1 if o["qty"] > 0 else -1) * o["exec_qty"] if o.get("exec_qty") is not None else (o["qty"] if o.get("ok") and not o.get("limit") else 0)
         px = o.get("exec_price") or o.get("price")
         if q and px:
             out.append((o["time"], q, px))
