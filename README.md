@@ -1,6 +1,6 @@
 # MNQ-Trader
 
-전국 대학생 AI 시스템 트레이딩 경진대회(해외선물)용 자동매매. LS증권 해외선물 **모의투자** OPEN API로 CME Micro E-mini Nasdaq-100(MNQ)을 거래한다.
+LS증권 해외선물 **모의투자** OPEN API로 CME Micro E-mini Nasdaq-100(MNQ)을 거래한다.
 
 | 항목 | 값 |
 |---|---|
